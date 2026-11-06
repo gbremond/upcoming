@@ -1,3 +1,4 @@
+use crate::state::SeriesSnapshot;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
 
@@ -70,6 +71,16 @@ impl BubbleSeries {
 
         upcoming.sort_by_key(|(_, date)| *date);
         upcoming
+    }
+
+    pub(crate) fn snapshot(&self) -> SeriesSnapshot {
+        let releases = self
+            .albums
+            .iter()
+            .map(|album| (album.id.clone(), album.first_publication_date()))
+            .collect();
+
+        SeriesSnapshot { releases }
     }
 }
 

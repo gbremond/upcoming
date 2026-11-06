@@ -2,6 +2,7 @@ mod bubble;
 use bubble::BubbleClient;
 mod config;
 use config::{Config, parse_config};
+mod state;
 use std::error::Error;
 use std::fs;
 

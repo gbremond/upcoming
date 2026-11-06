@@ -1,20 +1,38 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
 
-pub fn fetch_bubble_series(id: &str) -> Result<BubbleSeries, Box<dyn std::error::Error>> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?;
+impl BubbleClient {
+    pub fn new(http_client: reqwest::blocking::Client, base_url: String) -> Self {
+        Self {
+            http_client,
+            base_url,
+        }
+    }
 
-    let url = format!("https://api.bubblebd.com/v1.6/series/{id}");
+    pub fn fetch_bubble_series(
+        &self,
+        id: &str,
+    ) -> Result<BubbleSeries, Box<dyn std::error::Error>> {
+        let url = format!("{}/series/{id}", self.base_url.trim_end_matches('/'));
 
-    let response = client.get(url).send()?.error_for_status()?.text()?;
+        let response = self
+            .http_client
+            .get(url)
+            .send()?
+            .error_for_status()?
+            .text()?;
 
-    Ok(parse_bubble_series(&response)?)
+        Ok(parse_bubble_series(&response)?)
+    }
 }
 
 fn parse_bubble_series(contents: &str) -> Result<BubbleSeries, serde_json::Error> {
     serde_json::from_str(contents)
+}
+
+pub struct BubbleClient {
+    http_client: reqwest::blocking::Client,
+    base_url: String,
 }
 
 #[derive(Debug, Deserialize)]

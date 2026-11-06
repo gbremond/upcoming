@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
 
 pub fn fetch_bubble_series(id: &str) -> Result<BubbleSeries, Box<dyn std::error::Error>> {
@@ -27,8 +27,8 @@ pub struct BubbleSeries {
 pub struct BubbleAlbum {
     #[serde(rename = "objectId")]
     id: String,
-    title: Option<String>,
-    tome: Option<u32>,
+    pub title: Option<String>,
+    pub tome: Option<u32>,
     prints: Vec<BubblePrint>,
 }
 
@@ -36,6 +36,37 @@ pub struct BubbleAlbum {
 pub struct BubblePrint {
     #[serde(rename = "publicationDate")]
     publication_date: Option<DateTime<Utc>>,
+}
+
+impl BubbleSeries {
+    pub fn upcoming_albums(&self, today: NaiveDate) -> Vec<(&BubbleAlbum, NaiveDate)> {
+        let mut upcoming = Vec::new();
+
+        for album in &self.albums {
+            if let Some(date) = album.first_publication_date() {
+                if date >= today {
+                    upcoming.push((album, date));
+                }
+            }
+        }
+
+        upcoming.sort_by_key(|(_, date)| *date);
+        upcoming
+    }
+}
+
+impl BubbleAlbum {
+    fn first_publication_date(&self) -> Option<NaiveDate> {
+        self.prints
+            .iter()
+            .filter_map(|print| {
+                print
+                    .publication_date
+                    .as_ref()
+                    .map(|date| date.date_naive())
+            })
+            .min()
+    }
 }
 
 #[test]
@@ -66,4 +97,45 @@ fn parses_bubble_series_with_null_fields() {
 
     assert_eq!(album.prints[0].publication_date, Some(expected));
     assert_eq!(album.prints[1].publication_date, None);
+}
+
+#[test]
+fn upcoming_albums_excludes_reprints_and_unknown_dates() {
+    let json = r#"{
+        "title": "Example",
+        "albums": [
+            {
+                "objectId": "future",
+                "prints": [{"publicationDate": "2026-12-10T00:00:00Z"}]
+            },
+            {
+                "objectId": "reprint",
+                "prints": [
+                    {"publicationDate": "2026-12-10T00:00:00Z"},
+                    {"publicationDate": "2020-01-01T00:00:00Z"}
+                ]
+            },
+            {
+                "objectId": "today",
+                "prints": [{"publicationDate": "2026-11-06T00:00:00Z"}]
+            },
+            {
+                "objectId": "unknown",
+                "prints": [{"publicationDate": null}]
+            }
+        ]
+    }"#;
+
+    let series = parse_bubble_series(json).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 11, 6).unwrap();
+
+    let upcoming = series.upcoming_albums(today);
+
+    let ids: Vec<&str> = upcoming
+        .iter()
+        .map(|(album, _)| album.id.as_str())
+        .collect();
+
+    assert_eq!(ids, vec!["today", "future"]);
+    assert_eq!(upcoming[0].1, today);
 }

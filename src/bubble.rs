@@ -90,6 +90,8 @@ impl BubbleAlbum {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn parses_bubble_series_with_null_fields() {
@@ -164,9 +166,6 @@ mod tests {
 
     #[tokio::test]
     async fn fetches_bubble_series() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
         let server = MockServer::start().await;
 
         Mock::given(method("GET"))
@@ -182,12 +181,7 @@ mod tests {
         let base_url = format!("{}/v1.6/", server.uri());
 
         let series = tokio::task::spawn_blocking(move || {
-            let http_client = reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(2))
-                .build()
-                .unwrap();
-
-            let client = BubbleClient::new(http_client, base_url);
+            let client = test_client(base_url);
 
             client.fetch_bubble_series("example-id").unwrap()
         })
@@ -198,5 +192,44 @@ mod tests {
         assert!(series.albums.is_empty());
 
         server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn propagates_http_errors() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1.6/series/example-id"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let base_url = format!("{}/v1.6", server.uri());
+
+        let status = tokio::task::spawn_blocking(move || {
+            let client = test_client(base_url);
+            let error = client.fetch_bubble_series("example-id").unwrap_err();
+
+            error
+                .downcast_ref::<reqwest::Error>()
+                .expect("expected a Reqwest error")
+                .status()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(status, Some(reqwest::StatusCode::INTERNAL_SERVER_ERROR));
+
+        server.verify().await;
+    }
+
+    fn test_client(base_url: String) -> BubbleClient {
+        let http_client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+
+        BubbleClient::new(http_client, base_url)
     }
 }

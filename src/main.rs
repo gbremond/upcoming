@@ -15,8 +15,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             .build()?,
         "https://api.bubblebd.com/v1.6".to_string(),
     );
-
     let today = chrono::Local::now().date_naive();
+    let state_path = std::path::Path::new("state.json");
+    let mut state = state::TrackerState::load(state_path)?;
 
     for subscription in config.subscriptions {
         println!(
@@ -29,6 +30,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         let series = bubble_client.fetch_bubble_series(&subscription.id)?;
+
+        let snapshot = series.snapshot();
+
+        let series_states = state
+            .providers
+            .entry(subscription.provider.clone())
+            .or_default();
+
+        if let Some(previous) = series_states.get(&subscription.id) {
+            for change in snapshot.changes_since(previous) {
+                println!("  Change: {change:?}");
+            }
+        } else {
+            println!("  First run for this subscription: saving baseline.");
+        }
+
+        series_states.insert(subscription.id.clone(), snapshot);
 
         let upcoming = series.upcoming_albums(today);
 
@@ -57,6 +75,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
+
+    state.save(state_path)?;
 
     Ok(())
 }

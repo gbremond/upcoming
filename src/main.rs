@@ -1,3 +1,5 @@
+mod anilist;
+use anilist::AniListClient;
 mod bubble;
 use bubble::BubbleClient;
 mod config;
@@ -18,6 +20,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
     let bubble_client = BubbleClient::new(http.clone(), "https://api.bubblebd.com/v1.6".to_owned());
+    let anilist_client =
+        anilist::AniListClient::new(http.clone(), "https://graphql.anilist.co".to_owned());
+
     let webhook_url = std::env::var("DISCORD_WEBHOOK_URL").map_err(|error| {
         std::io::Error::other(format!("Could not read DISCORD_WEBHOOK_URL: {error}"))
     })?;
@@ -29,14 +34,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let today = chrono::Local::now().date_naive();
     let mut messages = Vec::new();
 
-    for subscription in config.subscriptions {
-        process_subscription(
-            &subscription,
-            &bubble_client,
-            &mut state,
-            today,
-            &mut messages,
-        )?;
+    for subscription in &config.subscriptions {
+        match subscription.provider.as_str() {
+            "bubble" => process_subscription(
+                subscription,
+                &bubble_client,
+                &mut state,
+                today,
+                &mut messages,
+            )?,
+            "anilist" => show_anime(subscription, &anilist_client)?,
+            provider => {
+                return Err(format!("Unsupported provider: {provider}").into());
+            }
+        }
     }
 
     notify_and_save(&notifier, &messages, &state, state_path)?;
@@ -79,6 +90,68 @@ fn process_subscription(
     Ok(())
 }
 
+fn show_anime(
+    subscription: &config::Subscription,
+    client: &anilist::AniListClient,
+) -> Result<(), Box<dyn Error>> {
+    let id = subscription.id.parse::<i32>().map_err(|error| {
+        std::io::Error::other(format!(
+            "Invalid AniList ID for {}: {error}",
+            subscription.name
+        ))
+    })?;
+
+    if id <= 0 {
+        return Err(std::io::Error::other("AniList ID must be positive").into());
+    }
+
+    let seasons = client.fetch_sequel_chain(id)?;
+
+    println!("=== anilist: {} ({id}) ===", subscription.name);
+
+    let updates = anime_updates(&seasons);
+    if updates.is_empty() {
+        println!("  No scheduled episodes or announced sequels.");
+    } else {
+        for update in updates {
+            println!("  {update}");
+        }
+    }
+
+    Ok(())
+}
+
+fn anime_updates(seasons: &[anilist::Anime]) -> Vec<String> {
+    let mut updates = Vec::new();
+    let mut announced = std::collections::HashSet::new();
+
+    for season in seasons {
+        if let Some(episode) = &season.next_airing_episode {
+            let local_time = episode.airing_at.with_timezone(&chrono::Local);
+            updates.push(format!(
+                "{} — episode {} airs at {}",
+                season.title(),
+                episode.episode,
+                local_time.format("%d/%m/%Y %H:%M %:z")
+            ));
+        }
+
+        for sequel in season.announced_sequels() {
+            if !announced.insert(sequel.id) {
+                continue;
+            }
+            updates.push(format!(
+                "❗ Announced sequel: {} ({}) — {}",
+                sequel.title(),
+                sequel.id,
+                sequel.release_window()
+            ));
+        }
+    }
+
+    updates
+}
+
 fn show_upcoming(
     series: &bubble::BubbleSeries,
     subscription_name: &str,
@@ -88,7 +161,7 @@ fn show_upcoming(
     let upcoming = series.upcoming_albums(today);
 
     if upcoming.is_empty() {
-        println!("No upcoming albums with known publication dates.");
+        println!("  No upcoming albums with known publication dates.");
         return;
     }
 
@@ -108,7 +181,7 @@ fn show_upcoming(
         };
 
         println!(
-            "  {} | {tome} | {title} | {timing}",
+            " ❗ {} | {tome} | {title} | {timing}",
             date.format("%d/%m/%Y")
         );
 
@@ -147,6 +220,52 @@ fn notify_and_save(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn anime_overview_shows_each_announcement_once() {
+        let sequel = serde_json::json!({
+            "relationType": "SEQUEL",
+            "node": {
+                "id": 3,
+                "type": "ANIME",
+                "status": "NOT_YET_RELEASED",
+                "title": {"romaji": "Season 3"},
+                "startDate": {"year": 2027, "month": 10, "day": null}
+            }
+        });
+        let seasons: Vec<anilist::Anime> = serde_json::from_value(serde_json::json!([
+            {
+                "id": 1, "title": {"romaji": "Season 1"},
+                "relations": {"edges": [sequel.clone()]}
+            },
+            {
+                "id": 2, "title": {"romaji": "Season 2"},
+                "relations": {"edges": [sequel]}
+            },
+            {"id": 3, "title": {"romaji": "Season 3"}}
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            anime_updates(&seasons),
+            vec!["❗ Announced sequel: Season 3 (3) — 2027-10 (day unknown)"]
+        );
+    }
+
+    #[test]
+    fn anime_overview_includes_scheduled_episodes() {
+        let seasons: Vec<anilist::Anime> = serde_json::from_value(serde_json::json!([{
+            "id": 1,
+            "title": {"romaji": "Example"},
+            "nextAiringEpisode": {"episode": 7, "airingAt": 0}
+        }]))
+        .unwrap();
+
+        let updates = anime_updates(&seasons);
+        assert_eq!(updates.len(), 1);
+        assert!(updates[0].starts_with("Example — episode 7 airs at "));
+        assert!(anime_updates(&[]).is_empty());
+    }
 
     struct FakeNotifier {
         fail: bool,

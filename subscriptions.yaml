@@ -8,3 +8,6 @@ subscriptions:
   - provider: bubble
     id: znYAWWpYRZsMlR
     name: Birdking
+  - provider: anilist
+    id: 154587
+    name: Frieren

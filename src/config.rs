@@ -68,4 +68,20 @@ subscriptions:
 
         assert!(result.is_err());
     }
+    #[test]
+    fn parses_anilist_subscription() {
+        let yaml = r#"
+subscriptions:
+  - provider: anilist
+    id: "154587"
+    name: Frieren
+"#;
+
+        let config = parse_config(yaml).unwrap();
+        let subscription = &config.subscriptions[0];
+
+        assert_eq!(subscription.provider, "anilist");
+        assert_eq!(subscription.id, "154587");
+        assert_eq!(subscription.name, "Frieren");
+    }
 }

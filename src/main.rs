@@ -2,7 +2,9 @@ mod bubble;
 use bubble::BubbleClient;
 mod config;
 use config::{Config, parse_config};
+mod reminder;
 mod state;
+use reminder::{Reminder, reminder_for};
 use std::error::Error;
 use std::fs;
 
@@ -36,7 +38,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         match state.update_series(&subscription.provider, &subscription.id, snapshot) {
             Some(changes) => {
                 for change in changes {
-                    println!("  Change: {change:?}");
+                    if change.should_notify(today) {
+                        println!("  Relevant change: {change:?}");
+                    }
                 }
             }
             None => println!("  First run for this subscription: saving baseline."),
@@ -66,6 +70,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     "  {} | {tome} | {title} | {timing}",
                     date.format("%d/%m/%Y")
                 );
+
+                if let Some(reminder) = reminder_for(date, today) {
+                    match reminder {
+                        Reminder::Today => println!("    Reminder: released today!"),
+                        Reminder::InOneWeek => println!("    Reminder: releasing in one week!"),
+                    }
+                }
             }
         }
     }

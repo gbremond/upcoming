@@ -2,6 +2,8 @@ mod bubble;
 use bubble::BubbleClient;
 mod config;
 use config::{Config, parse_config};
+mod notifier;
+use notifier::{DiscordClient, send_all};
 mod reminder;
 mod state;
 use reminder::{Reminder, reminder_for};
@@ -11,15 +13,21 @@ use std::fs;
 fn main() -> Result<(), Box<dyn Error>> {
     let contents = fs::read_to_string("subscriptions.yaml")?;
     let config: Config = parse_config(&contents)?;
-    let bubble_client = BubbleClient::new(
-        reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()?,
-        "https://api.bubblebd.com/v1.6".to_string(),
-    );
-    let today = chrono::Local::now().date_naive();
+
+    let http = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let bubble_client = BubbleClient::new(http.clone(), "https://api.bubblebd.com/v1.6".to_owned());
+    let webhook_url = std::env::var("DISCORD_WEBHOOK_URL").map_err(|error| {
+        std::io::Error::other(format!("Could not read DISCORD_WEBHOOK_URL: {error}"))
+    })?;
+    let notifier = DiscordClient::new(http, webhook_url);
+
     let state_path = std::path::Path::new("state.json");
     let mut state = state::TrackerState::load(state_path)?;
+
+    let today = chrono::Local::now().date_naive();
+    let mut messages = Vec::new();
 
     for subscription in config.subscriptions {
         println!(
@@ -40,6 +48,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 for change in changes {
                     if change.should_notify(today) {
                         println!("  Relevant change: {change:?}");
+                        messages.push(format!("{}: {change:?}", subscription.name));
                     }
                 }
             }
@@ -72,13 +81,28 @@ fn main() -> Result<(), Box<dyn Error>> {
                 );
 
                 if let Some(reminder) = reminder_for(date, today) {
-                    match reminder {
-                        Reminder::Today => println!("    Reminder: released today!"),
-                        Reminder::InOneWeek => println!("    Reminder: releasing in one week!"),
-                    }
+                    let description = match reminder {
+                        Reminder::Today => "releases today",
+                        Reminder::InOneWeek => "releases in one week",
+                    };
+
+                    let message = format!(
+                        "{} — {tome} — {title} {description} ({date})",
+                        subscription.name
+                    );
+                    println!("    Reminder: {message}");
+                    messages.push(message);
                 }
             }
         }
+    }
+
+    if let Err(failures) = send_all(&notifier, &messages) {
+        for (index, error) in &failures {
+            eprintln!("Notification {} failed: {error}", index + 1);
+        }
+
+        return Err(std::io::Error::other("notification delivery failed").into());
     }
 
     state.save(state_path)?;

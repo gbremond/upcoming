@@ -51,6 +51,22 @@ impl TrackerState {
 
         Ok(())
     }
+
+    pub(crate) fn update_series(
+        &mut self,
+        provider: &str,
+        series_id: &str,
+        snapshot: SeriesSnapshot,
+    ) -> Option<Vec<ReleaseChange>> {
+        let series = self.providers.entry(provider.to_owned()).or_default();
+
+        let changes = series
+            .get(series_id)
+            .map(|previous| snapshot.changes_since(previous));
+
+        series.insert(series_id.to_owned(), snapshot);
+        changes
+    }
 }
 
 impl SeriesSnapshot {
@@ -75,6 +91,24 @@ impl SeriesSnapshot {
         }
 
         changes
+    }
+}
+
+impl ReleaseChange {
+    pub(crate) fn should_notify(&self, today: NaiveDate) -> bool {
+        fn relevant(date: Option<NaiveDate>, today: NaiveDate) -> bool {
+            match date {
+                Some(date) => date >= today,
+                None => true,
+            }
+        }
+
+        match self {
+            ReleaseChange::Added { date, .. } => relevant(*date, today),
+            ReleaseChange::DateChanged {
+                old_date, new_date, ..
+            } => relevant(*old_date, today) || relevant(*new_date, today),
+        }
     }
 }
 
@@ -206,5 +240,83 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn first_observation_is_a_baseline_then_changes_are_reported() {
+        let mut state = TrackerState::default();
+
+        let first = SeriesSnapshot {
+            releases: BTreeMap::from([("album-1".to_owned(), None)]),
+        };
+
+        assert_eq!(state.update_series("bubble", "series-1", first), None);
+
+        let date = NaiveDate::from_ymd_opt(2027, 5, 21).unwrap();
+        let second = SeriesSnapshot {
+            releases: BTreeMap::from([("album-1".to_owned(), Some(date))]),
+        };
+
+        assert_eq!(
+            state.update_series("bubble", "series-1", second),
+            Some(vec![ReleaseChange::DateChanged {
+                id: "album-1".to_owned(),
+                old_date: None,
+                new_date: Some(date),
+            }])
+        );
+    }
+
+    #[test]
+    fn detects_changes_after_reloading_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let date = NaiveDate::from_ymd_opt(2027, 5, 21).unwrap();
+
+        let mut state = TrackerState::default();
+        let baseline = SeriesSnapshot {
+            releases: BTreeMap::from([("album-1".to_owned(), None)]),
+        };
+
+        assert_eq!(state.update_series("bubble", "series-1", baseline), None);
+        state.save(&path).unwrap();
+
+        // Simulate a new program run.
+        let mut reloaded = TrackerState::load(&path).unwrap();
+        let updated = SeriesSnapshot {
+            releases: BTreeMap::from([("album-1".to_owned(), Some(date))]),
+        };
+
+        assert_eq!(
+            reloaded.update_series("bubble", "series-1", updated),
+            Some(vec![ReleaseChange::DateChanged {
+                id: "album-1".to_owned(),
+                old_date: None,
+                new_date: Some(date),
+            }])
+        );
+    }
+
+    #[test]
+    fn notifies_about_upcoming_or_unknown_releases() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 6).unwrap();
+        let past = NaiveDate::from_ymd_opt(2026, 11, 5).unwrap();
+
+        let added = |date| ReleaseChange::Added {
+            id: "album-1".to_owned(),
+            date,
+        };
+
+        assert!(added(Some(today)).should_notify(today));
+        assert!(added(None).should_notify(today));
+        assert!(!added(Some(past)).should_notify(today));
+
+        let moved_to_past = ReleaseChange::DateChanged {
+            id: "album-1".to_owned(),
+            old_date: Some(today),
+            new_date: Some(past),
+        };
+
+        assert!(moved_to_past.should_notify(today));
     }
 }

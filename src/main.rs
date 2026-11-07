@@ -33,20 +33,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let snapshot = series.snapshot();
 
-        let series_states = state
-            .providers
-            .entry(subscription.provider.clone())
-            .or_default();
-
-        if let Some(previous) = series_states.get(&subscription.id) {
-            for change in snapshot.changes_since(previous) {
-                println!("  Change: {change:?}");
+        match state.update_series(&subscription.provider, &subscription.id, snapshot) {
+            Some(changes) => {
+                for change in changes {
+                    println!("  Change: {change:?}");
+                }
             }
-        } else {
-            println!("  First run for this subscription: saving baseline.");
+            None => println!("  First run for this subscription: saving baseline."),
         }
-
-        series_states.insert(subscription.id.clone(), snapshot);
 
         let upcoming = series.upcoming_albums(today);
 

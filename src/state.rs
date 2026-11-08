@@ -1,4 +1,5 @@
 use crate::release_date::ReleaseDate;
+use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -35,28 +36,43 @@ pub(crate) struct ReleaseRecord {
 }
 
 impl TrackerState {
-    pub(crate) fn load(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
+    pub(crate) fn load(path: &std::path::Path) -> Result<Self> {
         let contents = match std::fs::read_to_string(path) {
             Ok(contents) => contents,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self::default());
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Failed to read state {}", path.display()));
+            }
         };
 
-        Ok(serde_json::from_str(&contents)?)
+        serde_json::from_str(&contents)
+            .with_context(|| format!("Failed to parse state {}", path.display()))
     }
 
-    pub(crate) fn save(&self, path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    pub(crate) fn save(&self, path: &std::path::Path) -> Result<()> {
         let parent = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| std::path::Path::new("."));
 
-        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-        serde_json::to_writer_pretty(&mut temporary, self)?;
-        temporary.as_file().sync_all()?;
-        temporary.persist(path)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent).with_context(|| {
+            format!(
+                "Failed to create temporary state file in {}",
+                parent.display()
+            )
+        })?;
+        serde_json::to_writer_pretty(&mut temporary, self)
+            .with_context(|| format!("Failed to serialize state for {}", path.display()))?;
+        temporary
+            .as_file()
+            .sync_all()
+            .with_context(|| format!("Failed to sync temporary state for {}", path.display()))?;
+        temporary
+            .persist(path)
+            .with_context(|| format!("Failed to persist state to {}", path.display()))?;
 
         Ok(())
     }
@@ -124,6 +140,22 @@ impl ReleaseChange {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_state_retains_file_context_and_json_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, "{invalid").unwrap();
+
+        let error = TrackerState::load(&path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("Failed to parse state {}", path.display()))
+        );
+        assert!(error.downcast_ref::<serde_json::Error>().is_some());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{invalid");
+    }
 
     #[test]
     fn tracker_state_round_trips_multiple_subscriptions() {

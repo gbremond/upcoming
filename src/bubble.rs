@@ -1,5 +1,6 @@
 use crate::release_date::ReleaseDate;
 use crate::state::{ReleaseRecord, SeriesSnapshot};
+use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
 
@@ -11,20 +12,21 @@ impl BubbleClient {
         }
     }
 
-    pub fn fetch_bubble_series(
-        &self,
-        id: &str,
-    ) -> Result<BubbleSeries, Box<dyn std::error::Error>> {
+    pub fn fetch_bubble_series(&self, id: &str) -> Result<BubbleSeries> {
         let url = format!("{}/series/{id}", self.base_url.trim_end_matches('/'));
 
         let response = self
             .http_client
             .get(url)
-            .send()?
-            .error_for_status()?
-            .text()?;
+            .send()
+            .with_context(|| format!("Failed to send Bubble series request for {id}"))?
+            .error_for_status()
+            .with_context(|| format!("Bubble series request for {id} returned an HTTP error"))?
+            .text()
+            .with_context(|| format!("Failed to read Bubble series response for {id}"))?;
 
-        Ok(parse_bubble_series(&response)?)
+        parse_bubble_series(&response)
+            .with_context(|| format!("Failed to parse Bubble series response for {id}"))
     }
 }
 
@@ -39,7 +41,6 @@ pub struct BubbleClient {
 
 #[derive(Debug, Deserialize)]
 pub struct BubbleSeries {
-    title: String,
     albums: Vec<BubbleAlbum>,
 }
 
@@ -160,7 +161,6 @@ mod tests {
 
         let series = parse_bubble_series(json).unwrap();
 
-        assert_eq!(series.title, "Les 5 Terres");
         assert_eq!(series.albums.len(), 1);
 
         let album = &series.albums[0];
@@ -238,7 +238,6 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(series.title, "Example series");
         assert!(series.albums.is_empty());
 
         server.verify().await;

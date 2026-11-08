@@ -1,14 +1,18 @@
+use anyhow::{Context, Result};
 use reqwest::blocking::Client;
 
 pub(crate) fn send_all(
     notifier: &dyn Notifier,
     messages: &[String],
-) -> Result<(), Vec<(usize, Box<dyn std::error::Error>)>> {
+) -> Result<(), Vec<(usize, anyhow::Error)>> {
     let mut failures = Vec::new();
 
     for (index, message) in messages.iter().enumerate() {
         if let Err(error) = notifier.send(message) {
-            failures.push((index, error));
+            failures.push((
+                index,
+                error.context(format!("Failed to send notification {}", index + 1)),
+            ));
         }
     }
 
@@ -20,7 +24,7 @@ pub(crate) fn send_all(
 }
 
 pub(crate) trait Notifier {
-    fn send(&self, message: &str) -> Result<(), Box<dyn std::error::Error>>;
+    fn send(&self, message: &str) -> Result<()>;
 }
 
 pub(crate) struct DiscordClient {
@@ -35,7 +39,7 @@ impl DiscordClient {
 }
 
 impl Notifier for DiscordClient {
-    fn send(&self, message: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn send(&self, message: &str) -> Result<()> {
         let body = serde_json::json!({
             "content": message,
             "allowed_mentions": { "parse": [] }
@@ -46,9 +50,11 @@ impl Notifier for DiscordClient {
             .header("Content-Type", "application/json")
             .body(body.to_string())
             .send()
-            .map_err(|error| error.without_url())?
+            .map_err(|error| error.without_url())
+            .context("Failed to send Discord webhook request")?
             .error_for_status()
-            .map_err(|error| error.without_url())?;
+            .map_err(|error| error.without_url())
+            .context("Discord webhook returned an HTTP error")?;
 
         Ok(())
     }
@@ -109,7 +115,7 @@ mod tests {
                 .expect("expected a Reqwest error")
                 .status();
 
-            (status, error.to_string())
+            (status, format!("{error:#?}"))
         })
         .await
         .unwrap();
@@ -129,11 +135,11 @@ mod tests {
         }
 
         impl Notifier for TestNotifier {
-            fn send(&self, message: &str) -> Result<(), Box<dyn std::error::Error>> {
+            fn send(&self, message: &str) -> Result<()> {
                 self.attempted.borrow_mut().push(message.to_owned());
 
                 if message == "second" {
-                    return Err(std::io::Error::other("delivery failed").into());
+                    anyhow::bail!("delivery failed");
                 }
 
                 Ok(())

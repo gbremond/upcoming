@@ -1,5 +1,6 @@
 use crate::release_date::ReleaseDate;
 use crate::state::{ReleaseRecord, SeriesSnapshot};
+use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -54,32 +55,34 @@ impl AniListClient {
         Self { http, endpoint }
     }
 
-    pub(crate) fn fetch_anime(&self, id: i32) -> Result<Anime, Box<dyn std::error::Error>> {
+    pub(crate) fn fetch_anime(&self, id: i32) -> Result<Anime> {
         let body = serde_json::json!({
             "query": ANIME_QUERY,
             "variables": { "id": id }
         });
 
-        let mut anime: Anime = self.request_media(body)?;
+        let mut anime: Anime = self
+            .request_media(body)
+            .with_context(|| format!("Failed to fetch anime {id}, airing schedule page 1"))?;
         let first_page = anime.airing_schedule.take().ok_or_else(|| {
-            std::io::Error::other("AniList response is missing the airing schedule")
+            anyhow::anyhow!("AniList response for anime {id} is missing the airing schedule")
         })?;
         anime.scheduled_episodes = self.fetch_remaining_schedule(id, first_page)?;
         Ok(anime)
     }
 
-    fn request_media<T: serde::de::DeserializeOwned>(
-        &self,
-        body: serde_json::Value,
-    ) -> Result<T, Box<dyn std::error::Error>> {
+    fn request_media<T: serde::de::DeserializeOwned>(&self, body: serde_json::Value) -> Result<T> {
         let response = self
             .http
             .post(&self.endpoint)
             .header("Content-Type", "application/json")
             .body(body.to_string())
-            .send()?
-            .error_for_status()?
-            .text()?;
+            .send()
+            .context("Failed to send AniList GraphQL request")?
+            .error_for_status()
+            .context("AniList GraphQL request returned an HTTP error")?
+            .text()
+            .context("Failed to read AniList GraphQL response")?;
 
         parse_media(&response)
     }
@@ -88,7 +91,7 @@ impl AniListClient {
         &self,
         id: i32,
         mut schedule: AiringSchedule,
-    ) -> Result<Vec<ScheduledEpisode>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<ScheduledEpisode>> {
         let mut episodes = std::collections::BTreeMap::new();
         let mut page = 1;
 
@@ -96,10 +99,10 @@ impl AniListClient {
             for episode in schedule.nodes {
                 if let Some(previous) = episodes.get(&episode.id) {
                     if previous != &episode {
-                        return Err(std::io::Error::other(
-                            "AniList returned conflicting duplicate airing events",
-                        )
-                        .into());
+                        anyhow::bail!(
+                            "AniList returned conflicting duplicate airing events for anime {id}, event {}, page {page}",
+                            episode.id
+                        );
                     }
                 } else {
                     episodes.insert(episode.id, episode);
@@ -110,15 +113,17 @@ impl AniListClient {
                 break;
             }
             if page >= 100 {
-                return Err(
-                    std::io::Error::other("AniList airing schedule exceeded 100 pages").into(),
-                );
+                anyhow::bail!("AniList airing schedule for anime {id} exceeded 100 pages");
             }
             page += 1;
-            let media: ScheduleMedia = self.request_media(serde_json::json!({
-                "query": SCHEDULE_QUERY,
-                "variables": { "id": id, "page": page }
-            }))?;
+            let media: ScheduleMedia = self
+                .request_media(serde_json::json!({
+                    "query": SCHEDULE_QUERY,
+                    "variables": { "id": id, "page": page }
+                }))
+                .with_context(|| {
+                    format!("Failed to fetch airing schedule for anime {id}, page {page}")
+                })?;
             schedule = media.airing_schedule;
         }
 
@@ -127,12 +132,9 @@ impl AniListClient {
         Ok(episodes)
     }
 
-    pub(crate) fn fetch_sequel_chain(
-        &self,
-        root_id: i32,
-    ) -> Result<Vec<Anime>, Box<dyn std::error::Error>> {
+    pub(crate) fn fetch_sequel_chain(&self, root_id: i32) -> Result<Vec<Anime>> {
         if root_id <= 0 {
-            return Err(std::io::Error::other("AniList ID must be positive").into());
+            anyhow::bail!("AniList ID must be positive");
         }
 
         let mut pending = VecDeque::from([root_id]);
@@ -145,16 +147,18 @@ impl AniListClient {
             }
 
             if visited.len() >= 20 {
-                return Err(
-                    std::io::Error::other("AniList sequel traversal exceeded 20 entries").into(),
-                );
+                anyhow::bail!("AniList sequel traversal rooted at {root_id} exceeded 20 entries");
             }
 
             visited.insert(id);
-            let anime = self.fetch_anime(id)?;
+            let anime = self.fetch_anime(id).with_context(|| {
+                format!("Failed to fetch season {id} in sequel chain rooted at {root_id}")
+            })?;
 
             for sequel in anime.sequels() {
-                let sequel_id = i32::try_from(sequel.id)?;
+                let sequel_id = i32::try_from(sequel.id).with_context(|| {
+                    format!("Invalid sequel ID {} linked from anime {id}", sequel.id)
+                })?;
 
                 if !visited.contains(&sequel_id) {
                     pending.push_back(sequel_id);
@@ -168,14 +172,9 @@ impl AniListClient {
     }
 }
 
-fn parse_anime(contents: &str) -> Result<Anime, Box<dyn std::error::Error>> {
-    parse_media(contents)
-}
-
-fn parse_media<T: serde::de::DeserializeOwned>(
-    contents: &str,
-) -> Result<T, Box<dyn std::error::Error>> {
-    let response: AniListResponse<T> = serde_json::from_str(contents)?;
+fn parse_media<T: serde::de::DeserializeOwned>(contents: &str) -> Result<T> {
+    let response: AniListResponse<T> =
+        serde_json::from_str(contents).context("Failed to parse AniList GraphQL response")?;
 
     if let Some(errors) = response.errors {
         if !errors.is_empty() {
@@ -185,30 +184,31 @@ fn parse_media<T: serde::de::DeserializeOwned>(
                 .collect::<Vec<_>>()
                 .join("; ");
 
-            return Err(
-                std::io::Error::other(format!("AniList GraphQL errors: {messages}")).into(),
-            );
+            anyhow::bail!("AniList GraphQL errors: {messages}");
         }
     }
 
-    let data = response
-        .data
-        .ok_or_else(|| std::io::Error::other("AniList response is missing data"))?;
+    let data = response.data.context("AniList response is missing data")?;
 
-    let anime = data
-        .media
-        .ok_or_else(|| std::io::Error::other("AniList response contains no anime"))?;
+    let anime = data.media.context("AniList response contains no anime")?;
 
     Ok(anime)
 }
 
-pub(crate) fn anime_snapshot(
-    seasons: &[Anime],
-) -> Result<SeriesSnapshot, Box<dyn std::error::Error>> {
+pub(crate) fn anime_snapshot(seasons: &[Anime]) -> Result<SeriesSnapshot> {
     let mut releases = std::collections::BTreeMap::new();
 
     for season in seasons {
-        releases.insert(format!("season:{}", season.id), season.release_record()?);
+        releases.insert(
+            format!("season:{}", season.id),
+            season.release_record().with_context(|| {
+                format!(
+                    "Failed to map release record for anime {} ({})",
+                    season.id,
+                    season.title()
+                )
+            })?,
+        );
 
         for episode in &season.scheduled_episodes {
             releases.insert(
@@ -314,7 +314,7 @@ impl Anime {
             .unwrap_or("(untitled)")
     }
 
-    fn release_record(&self) -> Result<ReleaseRecord, Box<dyn std::error::Error>> {
+    fn release_record(&self) -> Result<ReleaseRecord> {
         let date = match &self.start_date {
             Some(date) => date.to_release_date()?,
             None => None,
@@ -405,12 +405,13 @@ impl PartialDate {
         }
     }
 
-    fn to_release_date(&self) -> Result<Option<ReleaseDate>, Box<dyn std::error::Error>> {
+    fn to_release_date(&self) -> Result<Option<ReleaseDate>> {
         match (self.year, self.month, self.day) {
             (None, None, None) => Ok(None),
             (Some(year), Some(month), Some(day)) => {
-                let date = NaiveDate::from_ymd_opt(year, month, day)
-                    .ok_or_else(|| std::io::Error::other("Invalid AniList start date"))?;
+                let date = NaiveDate::from_ymd_opt(year, month, day).with_context(|| {
+                    format!("Invalid AniList start date: {year}-{month:02}-{day:02}")
+                })?;
 
                 Ok(Some(ReleaseDate::Date(date)))
             }
@@ -453,6 +454,10 @@ impl ScheduledEpisode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_anime(contents: &str) -> Result<Anime> {
+        parse_media(contents)
+    }
 
     #[tokio::test]
     async fn fetches_all_schedule_pages_and_deduplicates_events() {
@@ -557,14 +562,15 @@ mod tests {
                 .timeout(std::time::Duration::from_secs(2))
                 .build()
                 .unwrap();
-            AniListClient::new(http, endpoint)
+            let error = AniListClient::new(http, endpoint)
                 .fetch_anime(1)
-                .unwrap_err()
-                .to_string()
+                .unwrap_err();
+            format!("{error:#}")
         })
         .await
         .unwrap();
-        assert_eq!(error, "AniList GraphQL errors: Too Many Requests.");
+        assert!(error.contains("Failed to fetch airing schedule for anime 1, page 2"));
+        assert!(error.contains("AniList GraphQL errors: Too Many Requests."));
         server.verify().await;
     }
 

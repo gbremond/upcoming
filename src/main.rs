@@ -9,18 +9,20 @@ mod presentation;
 mod release_date;
 mod reminder;
 mod state;
-use std::error::Error;
+use anyhow::{Context, Result};
 use std::fs;
 mod tracker;
 use tracker::{notify_and_save, process_anilist_subscription, process_bubble_subscription};
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let contents = fs::read_to_string("subscriptions.yaml")?;
-    let config: Config = parse_config(&contents)?;
+fn main() -> Result<()> {
+    let contents =
+        fs::read_to_string("subscriptions.yaml").context("Failed to read subscriptions.yaml")?;
+    let config: Config = parse_config(&contents).context("Failed to parse subscriptions.yaml")?;
 
     let http = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
-        .build()?;
+        .build()
+        .context("Failed to build HTTP client")?;
     let bubble_client = BubbleClient::new(http.clone(), "https://api.bubblebd.com/v1.6".to_owned());
     let anilist_client =
         anilist::AniListClient::new(http.clone(), "https://graphql.anilist.co".to_owned());
@@ -52,7 +54,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 &mut messages,
             )?,
             provider => {
-                return Err(format!("Unsupported provider: {provider}").into());
+                anyhow::bail!(
+                    "Unsupported provider '{provider}' for subscription '{}'",
+                    subscription.name
+                );
             }
         }
     }

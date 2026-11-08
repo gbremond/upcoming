@@ -81,7 +81,6 @@ pub(crate) fn show_upcoming(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
 
     #[test]
     fn anime_overview_shows_each_announcement_once() {

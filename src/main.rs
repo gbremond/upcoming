@@ -24,9 +24,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let anilist_client =
         anilist::AniListClient::new(http.clone(), "https://graphql.anilist.co".to_owned());
 
-    let webhook_url = std::env::var("DISCORD_WEBHOOK_URL").map_err(|error| {
-        std::io::Error::other(format!("Could not read DISCORD_WEBHOOK_URL: {error}"))
-    })?;
+    let webhook_url =
+        std::env::var("DISCORD_WEBHOOK_URL").unwrap_or_else(|_| "FAKE_KEY".to_owned());
     let notifier = DiscordClient::new(http, webhook_url);
 
     let state_path = std::path::Path::new("state.json");

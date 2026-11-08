@@ -18,10 +18,6 @@ pub(crate) fn process_bubble_subscription(
         subscription.provider, subscription.name, subscription.id
     );
 
-    if subscription.provider != "bubble" {
-        return Err(format!("Unsupported provider: {}", subscription.provider).into());
-    }
-
     let series = bubble_client.fetch_bubble_series(&subscription.id)?;
 
     match state.update_series(&subscription.provider, &subscription.id, series.snapshot()) {

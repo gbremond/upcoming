@@ -183,6 +183,7 @@ pub(super) struct ScheduleMedia {
 mod tests {
     use super::*;
     use crate::anilist::test_support::{FRIEREN_SEASON_2, parse_anime};
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn parses_anime_without_a_scheduled_episode() {

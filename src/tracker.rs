@@ -220,6 +220,7 @@ pub(crate) async fn notify_and_save(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
     use std::{collections::BTreeMap, time::Duration};
 
     fn unused_bubble_client() -> BubbleClient {

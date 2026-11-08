@@ -37,6 +37,7 @@ pub(crate) trait Notifier {
 mod tests {
     use super::*;
     use crate::notifier::notification::test_support::sample_notification;
+    use pretty_assertions::assert_eq;
 
     #[tokio::test]
     async fn attempts_remaining_messages_after_a_failure() {

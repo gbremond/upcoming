@@ -73,6 +73,7 @@ impl ScheduledEpisode {
 mod tests {
     use super::*;
     use crate::anilist::test_support::{FRIEREN_SEASON_2, FRIEREN_SEASON_3_ANNOUNCED, parse_anime};
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn season_record_preserves_an_announced_month() {

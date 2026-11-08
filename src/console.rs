@@ -76,6 +76,7 @@ pub(crate) fn anime_overview(seasons: &[anilist::Anime]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn album_overview_lists_upcoming_albums_by_date() {

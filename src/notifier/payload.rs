@@ -98,6 +98,7 @@ fn format_release_date(date: Option<&ReleaseDate>) -> String {
 mod tests {
     use super::*;
     use crate::notifier::notification::test_support::sample_notification;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn payload_describes_every_reason_and_preserves_dates() {

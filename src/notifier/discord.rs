@@ -41,6 +41,7 @@ mod tests {
     use crate::notifier::notification::test_support::sample_notification;
     use crate::release_date::ReleaseDate;
     use crate::state::ReleaseRecord;
+    use pretty_assertions::assert_eq;
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 

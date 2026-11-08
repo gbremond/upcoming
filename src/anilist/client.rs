@@ -192,15 +192,16 @@ pub(super) fn parse_media<T: serde::de::DeserializeOwned>(contents: &str) -> Res
         serde_json::from_str(contents).context("Failed to parse AniList GraphQL response")?;
 
     if let Some(errors) = response.errors
-        && !errors.is_empty() {
-            let messages = errors
-                .into_iter()
-                .map(|error| error.message)
-                .collect::<Vec<_>>()
-                .join("; ");
+        && !errors.is_empty()
+    {
+        let messages = errors
+            .into_iter()
+            .map(|error| error.message)
+            .collect::<Vec<_>>()
+            .join("; ");
 
-            anyhow::bail!("AniList GraphQL errors: {messages}");
-        }
+        anyhow::bail!("AniList GraphQL errors: {messages}");
+    }
 
     let data = response.data.context("AniList response is missing data")?;
 
@@ -269,6 +270,7 @@ query ($id: Int!, $page: Int!) {
 mod tests {
     use super::*;
     use crate::anilist::test_support::{FRIEREN_SEASON_2, TOO_MANY_REQUESTS, parse_anime};
+    use pretty_assertions::assert_eq;
     use serde_json::{Value, json};
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};

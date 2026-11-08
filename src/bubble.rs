@@ -52,9 +52,10 @@ impl BubbleSeries {
 
         for album in &self.albums {
             if let Some(date) = album.first_publication_date()
-                && date >= today {
-                    upcoming.push((album, date));
-                }
+                && date >= today
+            {
+                upcoming.push((album, date));
+            }
         }
 
         upcoming.sort_by_key(|(_, date)| *date);
@@ -152,6 +153,7 @@ struct CoverImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 

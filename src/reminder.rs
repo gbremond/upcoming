@@ -69,6 +69,7 @@ pub(crate) fn reminder_for(release_date: NaiveDate, today: NaiveDate) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn reminds_only_on_release_day_and_one_week_before() {

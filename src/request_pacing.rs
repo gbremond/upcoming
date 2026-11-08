@@ -42,6 +42,7 @@ impl RequestGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[tokio::test(start_paused = true)]
     async fn spaces_concurrent_requests() {

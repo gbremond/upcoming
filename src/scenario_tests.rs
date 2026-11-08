@@ -7,6 +7,7 @@ use crate::state::TrackerState;
 use crate::tracker;
 use anyhow::Result;
 use chrono::{Datelike, NaiveDate};
+use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Mutex;

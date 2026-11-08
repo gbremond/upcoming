@@ -15,5 +15,6 @@ tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "time"] }
 
 [dev-dependencies]
+pretty_assertions = "1.4.1"
 tokio = { version = "1.54.1", features = ["test-util"] }
 wiremock = "0.6.5"

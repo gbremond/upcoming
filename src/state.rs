@@ -9,7 +9,7 @@ pub(crate) struct TrackerState {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SeriesSnapshot {
-    pub(crate) releases: BTreeMap<String, Option<NaiveDate>>,
+    pub(crate) releases: BTreeMap<String, ReleaseRecord>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -23,6 +23,14 @@ pub(crate) enum ReleaseChange {
         old_date: Option<NaiveDate>,
         new_date: Option<NaiveDate>,
     },
+}
+
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ReleaseRecord {
+    pub(crate) date: Option<NaiveDate>,
+    pub(crate) title: Option<String>,
+    pub(crate) image_url: Option<String>,
+    pub(crate) url: Option<String>,
 }
 
 impl TrackerState {
@@ -73,17 +81,17 @@ impl SeriesSnapshot {
     pub(crate) fn changes_since(&self, previous: &SeriesSnapshot) -> Vec<ReleaseChange> {
         let mut changes = Vec::new();
 
-        for (id, new_date) in &self.releases {
+        for (id, current) in &self.releases {
             match previous.releases.get(id) {
                 None => changes.push(ReleaseChange::Added {
                     id: id.clone(),
-                    date: *new_date,
+                    date: current.date,
                 }),
-                Some(old_date) if old_date != new_date => {
+                Some(old) if old.date != current.date => {
                     changes.push(ReleaseChange::DateChanged {
                         id: id.clone(),
-                        old_date: *old_date,
-                        new_date: *new_date,
+                        old_date: old.date,
+                        new_date: current.date,
                     });
                 }
                 Some(_) => {}
@@ -125,7 +133,7 @@ mod tests {
         bubble.insert(
             "series-1".to_owned(),
             SeriesSnapshot {
-                releases: BTreeMap::from([("album-1".to_owned(), None)]),
+                releases: BTreeMap::from([("album-1".to_owned(), record(None))]),
             },
         );
         bubble.insert(
@@ -195,9 +203,9 @@ mod tests {
             releases: BTreeMap::from([
                 (
                     "album-18".to_owned(),
-                    Some(NaiveDate::from_ymd_opt(2026, 10, 8).unwrap()),
+                    record(Some(NaiveDate::from_ymd_opt(2026, 10, 8).unwrap())),
                 ),
-                ("album-19".to_owned(), None),
+                ("album-19".to_owned(), record(None)),
             ]),
         };
 
@@ -213,16 +221,16 @@ mod tests {
 
         let previous = SeriesSnapshot {
             releases: BTreeMap::from([
-                ("unchanged".to_owned(), Some(date)),
-                ("announced".to_owned(), None),
+                ("unchanged".to_owned(), record(Some(date))),
+                ("announced".to_owned(), record(None)),
             ]),
         };
 
         let current = SeriesSnapshot {
             releases: BTreeMap::from([
-                ("unchanged".to_owned(), Some(date)),
-                ("announced".to_owned(), Some(date)),
-                ("new".to_owned(), None),
+                ("unchanged".to_owned(), record(Some(date))),
+                ("announced".to_owned(), record(Some(date))),
+                ("new".to_owned(), record(None)),
             ]),
         };
 
@@ -247,14 +255,14 @@ mod tests {
         let mut state = TrackerState::default();
 
         let first = SeriesSnapshot {
-            releases: BTreeMap::from([("album-1".to_owned(), None)]),
+            releases: BTreeMap::from([("album-1".to_owned(), record(None))]),
         };
 
         assert_eq!(state.update_series("bubble", "series-1", first), None);
 
         let date = NaiveDate::from_ymd_opt(2027, 5, 21).unwrap();
         let second = SeriesSnapshot {
-            releases: BTreeMap::from([("album-1".to_owned(), Some(date))]),
+            releases: BTreeMap::from([("album-1".to_owned(), record(Some(date)))]),
         };
 
         assert_eq!(
@@ -275,7 +283,7 @@ mod tests {
 
         let mut state = TrackerState::default();
         let baseline = SeriesSnapshot {
-            releases: BTreeMap::from([("album-1".to_owned(), None)]),
+            releases: BTreeMap::from([("album-1".to_owned(), record(None))]),
         };
 
         assert_eq!(state.update_series("bubble", "series-1", baseline), None);
@@ -284,7 +292,7 @@ mod tests {
         // Simulate a new program run.
         let mut reloaded = TrackerState::load(&path).unwrap();
         let updated = SeriesSnapshot {
-            releases: BTreeMap::from([("album-1".to_owned(), Some(date))]),
+            releases: BTreeMap::from([("album-1".to_owned(), record(Some(date)))]),
         };
 
         assert_eq!(
@@ -318,5 +326,38 @@ mod tests {
         };
 
         assert!(moved_to_past.should_notify(today));
+    }
+
+    fn record(date: Option<NaiveDate>) -> ReleaseRecord {
+        ReleaseRecord {
+            date,
+            ..ReleaseRecord::default()
+        }
+    }
+
+    #[test]
+    fn metadata_changes_do_not_trigger_release_alerts() {
+        let previous = SeriesSnapshot {
+            releases: BTreeMap::from([(
+                "album-1".to_owned(),
+                ReleaseRecord {
+                    title: Some("Old title".to_owned()),
+                    ..ReleaseRecord::default()
+                },
+            )]),
+        };
+
+        let current = SeriesSnapshot {
+            releases: BTreeMap::from([(
+                "album-1".to_owned(),
+                ReleaseRecord {
+                    title: Some("Corrected title".to_owned()),
+                    image_url: Some("https://example.com/cover.jpg".to_owned()),
+                    ..ReleaseRecord::default()
+                },
+            )]),
+        };
+
+        assert!(current.changes_since(&previous).is_empty());
     }
 }

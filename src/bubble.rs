@@ -1,4 +1,4 @@
-use crate::state::SeriesSnapshot;
+use crate::state::{ReleaseRecord, SeriesSnapshot};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
 
@@ -49,6 +49,20 @@ pub struct BubbleAlbum {
     pub title: Option<String>,
     pub tome: Option<u32>,
     prints: Vec<BubblePrint>,
+    images: Option<AlbumImages>,
+    permalink: Option<String>,
+    #[serde(rename = "defaultSellingPrintObjectId")]
+    default_selling_print_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AlbumImages {
+    front: Option<CoverImage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoverImage {
+    medium: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,7 +91,17 @@ impl BubbleSeries {
         let releases = self
             .albums
             .iter()
-            .map(|album| (album.id.clone(), album.first_publication_date()))
+            .map(|album| {
+                (
+                    album.id.clone(),
+                    ReleaseRecord {
+                        date: album.first_publication_date(),
+                        title: album.title.clone(),
+                        image_url: album.cover_url().map(str::to_owned),
+                        url: album.page_url(),
+                    },
+                )
+            })
             .collect();
 
         SeriesSnapshot { releases }
@@ -95,6 +119,20 @@ impl BubbleAlbum {
                     .map(|date| date.date_naive())
             })
             .min()
+    }
+
+    fn cover_url(&self) -> Option<&str> {
+        self.images.as_ref()?.front.as_ref()?.medium.as_deref()
+    }
+
+    fn page_url(&self) -> Option<String> {
+        let permalink = self.permalink.as_deref()?;
+        let print_id = self.default_selling_print_id.as_deref()?;
+
+        Some(format!(
+            "https://www.bubblebd.com/{permalink}/album/{}/{print_id}",
+            self.id
+        ))
     }
 }
 

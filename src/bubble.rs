@@ -4,15 +4,20 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
 
+pub(crate) struct BubbleClient {
+    http_client: reqwest::Client,
+    base_url: String,
+}
+
 impl BubbleClient {
-    pub fn new(http_client: reqwest::Client, base_url: String) -> Self {
+    pub(crate) fn new(http_client: reqwest::Client, base_url: String) -> Self {
         Self {
             http_client,
             base_url,
         }
     }
 
-    pub async fn fetch_bubble_series(&self, id: &str) -> Result<BubbleSeries> {
+    pub(crate) async fn fetch_series(&self, id: &str) -> Result<BubbleSeries> {
         let url = format!("{}/series/{id}", self.base_url.trim_end_matches('/'));
 
         let response = self
@@ -27,64 +32,29 @@ impl BubbleClient {
             .await
             .with_context(|| format!("Failed to read Bubble series response for {id}"))?;
 
-        parse_bubble_series(&response)
+        parse_series(&response)
             .with_context(|| format!("Failed to parse Bubble series response for {id}"))
     }
 }
 
-fn parse_bubble_series(contents: &str) -> Result<BubbleSeries, serde_json::Error> {
+fn parse_series(contents: &str) -> Result<BubbleSeries, serde_json::Error> {
     serde_json::from_str(contents)
 }
 
-pub struct BubbleClient {
-    http_client: reqwest::Client,
-    base_url: String,
-}
-
 #[derive(Debug, Deserialize)]
-pub struct BubbleSeries {
+pub(crate) struct BubbleSeries {
     albums: Vec<BubbleAlbum>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct BubbleAlbum {
-    #[serde(rename = "objectId")]
-    id: String,
-    pub title: Option<String>,
-    pub tome: Option<u32>,
-    prints: Vec<BubblePrint>,
-    images: Option<AlbumImages>,
-    permalink: Option<String>,
-    #[serde(rename = "defaultSellingPrintObjectId")]
-    default_selling_print_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AlbumImages {
-    front: Option<CoverImage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CoverImage {
-    medium: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct BubblePrint {
-    #[serde(rename = "publicationDate")]
-    publication_date: Option<DateTime<Utc>>,
-}
-
 impl BubbleSeries {
-    pub fn upcoming_albums(&self, today: NaiveDate) -> Vec<(&BubbleAlbum, NaiveDate)> {
+    pub(crate) fn upcoming_albums(&self, today: NaiveDate) -> Vec<(&BubbleAlbum, NaiveDate)> {
         let mut upcoming = Vec::new();
 
         for album in &self.albums {
-            if let Some(date) = album.first_publication_date() {
-                if date >= today {
+            if let Some(date) = album.first_publication_date()
+                && date >= today {
                     upcoming.push((album, date));
                 }
-            }
         }
 
         upcoming.sort_by_key(|(_, date)| *date);
@@ -100,6 +70,19 @@ impl BubbleSeries {
 
         SeriesSnapshot { releases }
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct BubbleAlbum {
+    #[serde(rename = "objectId")]
+    id: String,
+    pub(crate) title: Option<String>,
+    pub(crate) tome: Option<u32>,
+    prints: Vec<BubblePrint>,
+    images: Option<AlbumImages>,
+    permalink: Option<String>,
+    #[serde(rename = "defaultSellingPrintObjectId")]
+    default_selling_print_id: Option<String>,
 }
 
 impl BubbleAlbum {
@@ -129,20 +112,41 @@ impl BubbleAlbum {
         ))
     }
 
+    pub(crate) fn tome_label(&self) -> String {
+        match self.tome {
+            Some(number) => format!("T{number:02}"),
+            None => "Unnumbered".to_owned(),
+        }
+    }
+
     pub(crate) fn release_record(&self) -> ReleaseRecord {
         ReleaseRecord {
             date: self.first_publication_date().map(ReleaseDate::Date),
             title: Some(format!(
                 "{} — {}",
-                self.tome
-                    .map(|number| format!("T{number:02}"))
-                    .unwrap_or_else(|| "Unnumbered".to_owned()),
+                self.tome_label(),
                 self.title.as_deref().unwrap_or("(untitled)")
             )),
             image_url: self.cover_url().map(str::to_owned),
             url: self.page_url(),
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct BubblePrint {
+    #[serde(rename = "publicationDate")]
+    publication_date: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AlbumImages {
+    front: Option<CoverImage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoverImage {
+    medium: Option<String>,
 }
 
 #[cfg(test)]
@@ -166,7 +170,7 @@ mod tests {
         }]
     }"#;
 
-        let series = parse_bubble_series(json).unwrap();
+        let series = parse_series(json).unwrap();
 
         assert_eq!(series.albums.len(), 1);
 
@@ -207,7 +211,7 @@ mod tests {
         ]
     }"#;
 
-        let series = parse_bubble_series(json).unwrap();
+        let series = parse_series(json).unwrap();
         let today = NaiveDate::from_ymd_opt(2026, 11, 6).unwrap();
 
         let upcoming = series.upcoming_albums(today);
@@ -240,7 +244,7 @@ mod tests {
         let series = {
             let client = test_client(base_url);
 
-            client.fetch_bubble_series("example-id").await.unwrap()
+            client.fetch_series("example-id").await.unwrap()
         };
 
         assert!(series.albums.is_empty());
@@ -263,7 +267,7 @@ mod tests {
 
         let status = {
             let client = test_client(base_url);
-            let error = client.fetch_bubble_series("example-id").await.unwrap_err();
+            let error = client.fetch_series("example-id").await.unwrap_err();
 
             error
                 .downcast_ref::<reqwest::Error>()

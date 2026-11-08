@@ -1,21 +1,21 @@
 use serde::Deserialize;
 
-pub fn parse_config(contents: &str) -> Result<Config, serde_saphyr::Error> {
+pub(crate) fn parse_config(contents: &str) -> Result<Config, serde_saphyr::Error> {
     serde_saphyr::from_str(contents)
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Config {
-    pub subscriptions: Vec<Subscription>,
+pub(crate) struct Config {
+    pub(crate) subscriptions: Vec<Subscription>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Subscription {
-    pub provider: String,
-    pub id: String,
-    pub name: String,
+pub(crate) struct Subscription {
+    pub(crate) provider: String,
+    pub(crate) id: String,
+    pub(crate) name: String,
 }
 
 #[cfg(test)]

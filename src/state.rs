@@ -9,32 +9,6 @@ pub(crate) struct TrackerState {
     pub(crate) providers: BTreeMap<String, BTreeMap<String, SeriesSnapshot>>,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct SeriesSnapshot {
-    pub(crate) releases: BTreeMap<String, ReleaseRecord>,
-}
-
-#[derive(Debug, PartialEq)]
-pub(crate) enum ReleaseChange {
-    Added {
-        id: String,
-        date: Option<ReleaseDate>,
-    },
-    DateChanged {
-        id: String,
-        old_date: Option<ReleaseDate>,
-        new_date: Option<ReleaseDate>,
-    },
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub(crate) struct ReleaseRecord {
-    pub(crate) date: Option<ReleaseDate>,
-    pub(crate) title: Option<String>,
-    pub(crate) image_url: Option<String>,
-    pub(crate) url: Option<String>,
-}
-
 impl TrackerState {
     pub(crate) fn load(path: &std::path::Path) -> Result<Self> {
         let contents = match std::fs::read_to_string(path) {
@@ -77,7 +51,9 @@ impl TrackerState {
         Ok(())
     }
 
-    pub(crate) fn update_series(
+    /// Stores the latest snapshot of a series and returns what changed since
+    /// the previous one, or `None` on the first run (nothing to compare with).
+    pub(crate) fn record_snapshot(
         &mut self,
         provider: &str,
         series_id: &str,
@@ -92,6 +68,11 @@ impl TrackerState {
         series.insert(series_id.to_owned(), snapshot);
         changes
     }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SeriesSnapshot {
+    pub(crate) releases: BTreeMap<String, ReleaseRecord>,
 }
 
 impl SeriesSnapshot {
@@ -119,6 +100,19 @@ impl SeriesSnapshot {
     }
 }
 
+#[derive(Debug, PartialEq)]
+pub(crate) enum ReleaseChange {
+    Added {
+        id: String,
+        date: Option<ReleaseDate>,
+    },
+    DateChanged {
+        id: String,
+        old_date: Option<ReleaseDate>,
+        new_date: Option<ReleaseDate>,
+    },
+}
+
 impl ReleaseChange {
     pub(crate) fn should_notify(&self, today: NaiveDate) -> bool {
         fn relevant(date: Option<&ReleaseDate>, today: NaiveDate) -> bool {
@@ -135,6 +129,14 @@ impl ReleaseChange {
             } => relevant(old_date.as_ref(), today) || relevant(new_date.as_ref(), today),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ReleaseRecord {
+    pub(crate) date: Option<ReleaseDate>,
+    pub(crate) title: Option<String>,
+    pub(crate) image_url: Option<String>,
+    pub(crate) url: Option<String>,
 }
 
 #[cfg(test)]
@@ -291,7 +293,7 @@ mod tests {
             releases: BTreeMap::from([("album-1".to_owned(), record(None))]),
         };
 
-        assert_eq!(state.update_series("bubble", "series-1", first), None);
+        assert_eq!(state.record_snapshot("bubble", "series-1", first), None);
 
         let date = NaiveDate::from_ymd_opt(2027, 5, 21).unwrap();
         let second = SeriesSnapshot {
@@ -299,7 +301,7 @@ mod tests {
         };
 
         assert_eq!(
-            state.update_series("bubble", "series-1", second),
+            state.record_snapshot("bubble", "series-1", second),
             Some(vec![ReleaseChange::DateChanged {
                 id: "album-1".to_owned(),
                 old_date: None,
@@ -319,7 +321,7 @@ mod tests {
             releases: BTreeMap::from([("album-1".to_owned(), record(None))]),
         };
 
-        assert_eq!(state.update_series("bubble", "series-1", baseline), None);
+        assert_eq!(state.record_snapshot("bubble", "series-1", baseline), None);
         state.save(&path).unwrap();
 
         // Simulate a new program run.
@@ -329,7 +331,7 @@ mod tests {
         };
 
         assert_eq!(
-            reloaded.update_series("bubble", "series-1", updated),
+            reloaded.record_snapshot("bubble", "series-1", updated),
             Some(vec![ReleaseChange::DateChanged {
                 id: "album-1".to_owned(),
                 old_date: None,

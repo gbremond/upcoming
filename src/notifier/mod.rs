@@ -9,12 +9,12 @@ use anyhow::Result;
 
 pub(crate) async fn send_all(
     notifier: &impl Notifier,
-    messages: &[ReleaseNotification],
+    notifications: &[ReleaseNotification],
 ) -> Result<(), Vec<(usize, anyhow::Error)>> {
     let mut failures = Vec::new();
 
-    for (index, message) in messages.iter().enumerate() {
-        if let Err(error) = notifier.send(message).await {
+    for (index, notification) in notifications.iter().enumerate() {
+        if let Err(error) = notifier.send(notification).await {
             failures.push((
                 index,
                 error.context(format!("Failed to send notification {}", index + 1)),
@@ -30,7 +30,7 @@ pub(crate) async fn send_all(
 }
 
 pub(crate) trait Notifier {
-    async fn send(&self, message: &ReleaseNotification) -> Result<()>;
+    async fn send(&self, notification: &ReleaseNotification) -> Result<()>;
 }
 
 #[cfg(test)]
@@ -63,7 +63,7 @@ mod tests {
         let notifier = TestNotifier {
             attempted: RefCell::new(Vec::new()),
         };
-        let messages: Vec<_> = ["first", "second", "third"]
+        let notifications: Vec<_> = ["first", "second", "third"]
             .into_iter()
             .map(|name| ReleaseNotification {
                 subscription_name: name.to_owned(),
@@ -71,13 +71,13 @@ mod tests {
             })
             .collect();
 
-        let failures = send_all(&notifier, &messages).await.unwrap_err();
+        let failures = send_all(&notifier, &notifications).await.unwrap_err();
 
         assert_eq!(
             *notifier.attempted.borrow(),
             vec!["first", "second", "third"]
         );
         assert_eq!(failures.len(), 1);
-        assert_eq!(failures[0].0, 1); // The second message failed.
+        assert_eq!(failures[0].0, 1); // The second notification failed.
     }
 }

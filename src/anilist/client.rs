@@ -6,45 +6,6 @@ use serde::Deserialize;
 use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
-const ANIME_QUERY: &str = r#"
-query ($id: Int!) {
-    Media(id: $id, type: ANIME) {
-        id
-        title { romaji english }
-        startDate { year month day }
-        nextAiringEpisode { episode airingAt }
-        coverImage { extraLarge }
-        airingSchedule(page: 1, perPage: 25) {
-            pageInfo { hasNextPage }
-            nodes { id episode airingAt }
-        }
-        relations {
-            edges {
-                relationType
-                node {
-                    id
-                    type
-                    title { romaji english }
-                    status
-                    startDate { year month day }
-                }
-            }
-        }
-    }
-}
-"#;
-
-const SCHEDULE_QUERY: &str = r#"
-query ($id: Int!, $page: Int!) {
-    Media(id: $id, type: ANIME) {
-        airingSchedule(page: $page, perPage: 25) {
-            pageInfo { hasNextPage }
-            nodes { id episode airingAt }
-        }
-    }
-}
-"#;
-
 pub(crate) struct AniListClient {
     http: reqwest::Client,
     endpoint: String,
@@ -230,8 +191,8 @@ pub(super) fn parse_media<T: serde::de::DeserializeOwned>(contents: &str) -> Res
     let response: AniListResponse<T> =
         serde_json::from_str(contents).context("Failed to parse AniList GraphQL response")?;
 
-    if let Some(errors) = response.errors {
-        if !errors.is_empty() {
+    if let Some(errors) = response.errors
+        && !errors.is_empty() {
             let messages = errors
                 .into_iter()
                 .map(|error| error.message)
@@ -240,7 +201,6 @@ pub(super) fn parse_media<T: serde::de::DeserializeOwned>(contents: &str) -> Res
 
             anyhow::bail!("AniList GraphQL errors: {messages}");
         }
-    }
 
     let data = response.data.context("AniList response is missing data")?;
 
@@ -248,6 +208,7 @@ pub(super) fn parse_media<T: serde::de::DeserializeOwned>(contents: &str) -> Res
 
     Ok(anime)
 }
+
 #[derive(Debug, Deserialize)]
 struct AniListResponse<T> {
     data: Option<AniListData<T>>,
@@ -255,15 +216,54 @@ struct AniListResponse<T> {
 }
 
 #[derive(Debug, Deserialize)]
-struct GraphQlError {
-    message: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct AniListData<T> {
     #[serde(rename = "Media")]
     media: Option<T>,
 }
+
+#[derive(Debug, Deserialize)]
+struct GraphQlError {
+    message: String,
+}
+
+const ANIME_QUERY: &str = r#"
+query ($id: Int!) {
+    Media(id: $id, type: ANIME) {
+        id
+        title { romaji english }
+        startDate { year month day }
+        nextAiringEpisode { episode airingAt }
+        coverImage { extraLarge }
+        airingSchedule(page: 1, perPage: 25) {
+            pageInfo { hasNextPage }
+            nodes { id episode airingAt }
+        }
+        relations {
+            edges {
+                relationType
+                node {
+                    id
+                    type
+                    title { romaji english }
+                    status
+                    startDate { year month day }
+                }
+            }
+        }
+    }
+}
+"#;
+
+const SCHEDULE_QUERY: &str = r#"
+query ($id: Int!, $page: Int!) {
+    Media(id: $id, type: ANIME) {
+        airingSchedule(page: $page, perPage: 25) {
+            pageInfo { hasNextPage }
+            nodes { id episode airingAt }
+        }
+    }
+}
+"#;
 
 #[cfg(test)]
 mod tests {

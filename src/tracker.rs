@@ -1,47 +1,46 @@
 use crate::anilist::{AniListClient, Anime};
 use crate::bubble::{BubbleClient, BubbleSeries};
 use crate::config;
+use crate::console::{album_overview, anime_overview, print_reminders, print_section};
 use crate::notifier::{self, NotificationReason, ReleaseNotification, send_all};
-use crate::presentation::{anime_updates, episode_reminders, show_upcoming};
+use crate::reminder::{album_reminders, episode_reminders};
 use crate::state;
 use anyhow::{Context, Result};
 
-fn update_subscription(
-    subscription: &config::Subscription,
-    snapshot: state::SeriesSnapshot,
-    state: &mut state::TrackerState,
+/// One full tracker pass: fetch every subscription concurrently, apply the
+/// results in config order, then notify and save.
+pub(crate) async fn run(
+    subscriptions: &[config::Subscription],
+    bubble_client: &BubbleClient,
+    anilist_client: &AniListClient,
+    notifier: &impl notifier::Notifier,
+    state_path: &std::path::Path,
     today: chrono::NaiveDate,
-    messages: &mut Vec<ReleaseNotification>,
-) {
-    match state.update_series(&subscription.provider, &subscription.id, snapshot) {
-        Some(changes) => {
-            for change in changes {
-                if !change.should_notify(today) {
-                    continue;
-                }
+) -> Result<()> {
+    let mut state = state::TrackerState::load(state_path)?;
+    let mut notifications = Vec::new();
 
-                let (id, reason) = match change {
-                    state::ReleaseChange::Added { id, .. } => (id, NotificationReason::Added),
-                    state::ReleaseChange::DateChanged { id, old_date, .. } => {
-                        (id, NotificationReason::DateChanged { old_date })
-                    }
-                };
+    let results = futures::future::join_all(
+        subscriptions
+            .iter()
+            .map(|subscription| fetch_subscription(subscription, bubble_client, anilist_client)),
+    )
+    .await;
 
-                let release =
-                    state.providers[&subscription.provider][&subscription.id].releases[&id].clone();
-
-                messages.push(ReleaseNotification {
-                    subscription_name: subscription.name.clone(),
-                    release,
-                    reason,
-                });
-            }
-        }
-        None => println!("  First run for this subscription: saving baseline."),
+    for (subscription, fetched) in subscriptions.iter().zip(results) {
+        apply_subscription(
+            subscription,
+            fetched?,
+            &mut state,
+            today,
+            &mut notifications,
+        )?;
     }
+
+    notify_and_save(notifier, &notifications, &state, state_path).await
 }
 
-pub(crate) enum Fetched {
+pub(crate) enum FetchedSeries {
     Bubble(BubbleSeries),
     AniList(Vec<Anime>),
 }
@@ -50,7 +49,7 @@ pub(crate) async fn fetch_subscription(
     subscription: &config::Subscription,
     bubble_client: &BubbleClient,
     anilist_client: &AniListClient,
-) -> Result<Fetched> {
+) -> Result<FetchedSeries> {
     let started = std::time::Instant::now();
     eprintln!(
         "→ Fetching {}: {} ({})",
@@ -60,7 +59,7 @@ pub(crate) async fn fetch_subscription(
     let fetched = match subscription.provider.as_str() {
         "bubble" => {
             let series = bubble_client
-                .fetch_bubble_series(&subscription.id)
+                .fetch_series(&subscription.id)
                 .await
                 .with_context(|| {
                     format!(
@@ -68,7 +67,7 @@ pub(crate) async fn fetch_subscription(
                         subscription.name, subscription.id
                     )
                 })?;
-            Ok(Fetched::Bubble(series))
+            Ok(FetchedSeries::Bubble(series))
         }
         "anilist" => {
             let id = subscription.id.parse::<i32>().with_context(|| {
@@ -94,7 +93,7 @@ pub(crate) async fn fetch_subscription(
                         subscription.name
                     )
                 })?;
-            Ok(Fetched::AniList(seasons))
+            Ok(FetchedSeries::AniList(seasons))
         }
         provider => anyhow::bail!(
             "Unsupported provider '{provider}' for subscription '{}'",
@@ -116,10 +115,10 @@ pub(crate) async fn fetch_subscription(
 
 pub(crate) fn apply_subscription(
     subscription: &config::Subscription,
-    fetched: Fetched,
+    fetched: FetchedSeries,
     state: &mut state::TrackerState,
     today: chrono::NaiveDate,
-    messages: &mut Vec<ReleaseNotification>,
+    notifications: &mut Vec<ReleaseNotification>,
 ) -> Result<()> {
     println!(
         "=== {}: {} ({}) ===",
@@ -127,11 +126,18 @@ pub(crate) fn apply_subscription(
     );
 
     match fetched {
-        Fetched::Bubble(series) => {
-            update_subscription(subscription, series.snapshot(), state, today, messages);
-            show_upcoming(&series, &subscription.name, today, messages);
+        FetchedSeries::Bubble(series) => {
+            let reminders = album_reminders(&series, &subscription.name, today);
+            collect_changes(subscription, series.snapshot(), state, today, notifications);
+            print_reminders(&reminders);
+            notifications.extend(reminders);
+
+            print_section(
+                &album_overview(&series, today),
+                "No upcoming albums with known publication dates.",
+            );
         }
-        Fetched::AniList(seasons) => {
+        FetchedSeries::AniList(seasons) => {
             let snapshot = crate::anilist::anime_snapshot(&seasons).with_context(|| {
                 format!(
                     "Failed to build release snapshot for AniList subscription '{}' ({})",
@@ -140,62 +146,62 @@ pub(crate) fn apply_subscription(
             })?;
 
             let reminders = episode_reminders(&snapshot, &subscription.name, today);
+            collect_changes(subscription, snapshot, state, today, notifications);
+            print_reminders(&reminders);
+            notifications.extend(reminders);
 
-            update_subscription(subscription, snapshot, state, today, messages);
-
-            for notification in reminders {
-                println!("    Reminder: {:?}", notification);
-                messages.push(notification);
-            }
-
-            let updates = anime_updates(&seasons);
-            if updates.is_empty() {
-                println!("  No scheduled episodes or announced sequels.");
-            } else {
-                for update in updates {
-                    println!("  {update}");
-                }
-            }
+            print_section(
+                &anime_overview(&seasons),
+                "No scheduled episodes or announced sequels.",
+            );
         }
     }
 
     Ok(())
 }
 
-/// One full tracker pass: fetch every subscription concurrently, apply the
-/// results in config order, then notify and save.
-pub(crate) async fn run(
-    subscriptions: &[config::Subscription],
-    bubble_client: &BubbleClient,
-    anilist_client: &AniListClient,
-    notifier: &impl notifier::Notifier,
-    state_path: &std::path::Path,
+fn collect_changes(
+    subscription: &config::Subscription,
+    snapshot: state::SeriesSnapshot,
+    state: &mut state::TrackerState,
     today: chrono::NaiveDate,
-) -> Result<()> {
-    let mut state = state::TrackerState::load(state_path)?;
-    let mut messages = Vec::new();
+    notifications: &mut Vec<ReleaseNotification>,
+) {
+    match state.record_snapshot(&subscription.provider, &subscription.id, snapshot) {
+        Some(changes) => {
+            for change in changes {
+                if !change.should_notify(today) {
+                    continue;
+                }
 
-    let results = futures::future::join_all(
-        subscriptions
-            .iter()
-            .map(|subscription| fetch_subscription(subscription, bubble_client, anilist_client)),
-    )
-    .await;
+                let (id, reason) = match change {
+                    state::ReleaseChange::Added { id, .. } => (id, NotificationReason::Added),
+                    state::ReleaseChange::DateChanged { id, old_date, .. } => {
+                        (id, NotificationReason::DateChanged { old_date })
+                    }
+                };
 
-    for (subscription, fetched) in subscriptions.iter().zip(results) {
-        apply_subscription(subscription, fetched?, &mut state, today, &mut messages)?;
+                let release =
+                    state.providers[&subscription.provider][&subscription.id].releases[&id].clone();
+
+                notifications.push(ReleaseNotification {
+                    subscription_name: subscription.name.clone(),
+                    release,
+                    reason,
+                });
+            }
+        }
+        None => println!("  First run for this subscription: saving baseline."),
     }
-
-    notify_and_save(notifier, &messages, &state, state_path).await
 }
 
 pub(crate) async fn notify_and_save(
     notifier: &impl notifier::Notifier,
-    messages: &[ReleaseNotification],
+    notifications: &[ReleaseNotification],
     state: &state::TrackerState,
     path: &std::path::Path,
 ) -> Result<()> {
-    if let Err(failures) = send_all(notifier, messages).await {
+    if let Err(failures) = send_all(notifier, notifications).await {
         for (index, error) in &failures {
             eprintln!("Notification {} failed: {error:#}", index + 1);
         }
@@ -283,7 +289,7 @@ mod tests {
         updated
             .providers
             .insert("bubble".to_owned(), BTreeMap::new());
-        let messages = vec![ReleaseNotification {
+        let notifications = vec![ReleaseNotification {
             subscription_name: "Example".to_owned(),
             release: state::ReleaseRecord {
                 title: Some("New release".to_owned()),
@@ -293,7 +299,7 @@ mod tests {
         }];
 
         let failing = FakeNotifier { fail: true };
-        let error = notify_and_save(&failing, &messages, &updated, &path)
+        let error = notify_and_save(&failing, &notifications, &updated, &path)
             .await
             .unwrap_err();
         let chain = format!("{error:#}");
@@ -303,7 +309,7 @@ mod tests {
         assert_eq!(state::TrackerState::load(&path).unwrap(), previous);
 
         let successful = FakeNotifier { fail: false };
-        notify_and_save(&successful, &messages, &updated, &path)
+        notify_and_save(&successful, &notifications, &updated, &path)
             .await
             .unwrap();
         assert_eq!(state::TrackerState::load(&path).unwrap(), updated);

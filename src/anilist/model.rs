@@ -20,39 +20,6 @@ pub(crate) struct Anime {
     pub(super) scheduled_episodes: Vec<ScheduledEpisode>,
 }
 
-#[derive(Debug, Deserialize)]
-pub(super) struct AnimeCover {
-    #[serde(rename = "extraLarge")]
-    pub(super) extra_large: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct AiringSchedule {
-    #[serde(rename = "pageInfo")]
-    pub(super) page_info: SchedulePageInfo,
-    pub(super) nodes: Vec<ScheduledEpisode>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct ScheduleMedia {
-    #[serde(rename = "airingSchedule")]
-    pub(super) airing_schedule: AiringSchedule,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct SchedulePageInfo {
-    #[serde(rename = "hasNextPage")]
-    pub(super) has_next_page: bool,
-}
-
-#[derive(Debug, PartialEq, Deserialize)]
-pub(super) struct ScheduledEpisode {
-    pub(super) id: u32,
-    pub(super) episode: u32,
-    #[serde(rename = "airingAt", with = "chrono::serde::ts_seconds")]
-    pub(super) airing_at: DateTime<Utc>,
-}
-
 impl Anime {
     pub(super) fn sequels(&self) -> Vec<&Sequel> {
         self.relations
@@ -82,43 +49,9 @@ impl Anime {
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct AnimeRelations {
-    pub(super) edges: Vec<AnimeRelation>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct AnimeRelation {
-    #[serde(rename = "relationType")]
-    pub(super) relation_type: String,
-    pub(super) node: Sequel,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct Sequel {
-    pub(crate) id: u32,
-    pub(super) title: AnimeTitle,
-    #[serde(rename = "type")]
-    pub(super) media_type: Option<String>,
-    pub(super) status: Option<String>,
-    #[serde(rename = "startDate")]
-    pub(super) start_date: Option<PartialDate>,
-}
-
-impl Sequel {
-    pub(crate) fn title(&self) -> &str {
-        self.title
-            .english
-            .as_deref()
-            .or(self.title.romaji.as_deref())
-            .unwrap_or("(untitled)")
-    }
-
-    pub(crate) fn release_window(&self) -> String {
-        match &self.start_date {
-            Some(date) => date.display(),
-            None => "date unknown".to_owned(),
-        }
-    }
+pub(super) struct AnimeTitle {
+    pub(super) romaji: Option<String>,
+    pub(super) english: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -167,16 +100,83 @@ impl PartialDate {
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct AnimeTitle {
-    pub(super) romaji: Option<String>,
-    pub(super) english: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 pub(crate) struct AiringEpisode {
     pub(crate) episode: u32,
     #[serde(rename = "airingAt", with = "chrono::serde::ts_seconds")]
     pub(crate) airing_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct AnimeRelations {
+    pub(super) edges: Vec<AnimeRelation>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct AnimeRelation {
+    #[serde(rename = "relationType")]
+    pub(super) relation_type: String,
+    pub(super) node: Sequel,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct Sequel {
+    pub(crate) id: u32,
+    pub(super) title: AnimeTitle,
+    #[serde(rename = "type")]
+    pub(super) media_type: Option<String>,
+    pub(super) status: Option<String>,
+    #[serde(rename = "startDate")]
+    pub(super) start_date: Option<PartialDate>,
+}
+
+impl Sequel {
+    pub(crate) fn title(&self) -> &str {
+        self.title
+            .english
+            .as_deref()
+            .or(self.title.romaji.as_deref())
+            .unwrap_or("(untitled)")
+    }
+
+    pub(crate) fn release_window(&self) -> String {
+        match &self.start_date {
+            Some(date) => date.display(),
+            None => "date unknown".to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct AnimeCover {
+    #[serde(rename = "extraLarge")]
+    pub(super) extra_large: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct AiringSchedule {
+    #[serde(rename = "pageInfo")]
+    pub(super) page_info: SchedulePageInfo,
+    pub(super) nodes: Vec<ScheduledEpisode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct SchedulePageInfo {
+    #[serde(rename = "hasNextPage")]
+    pub(super) has_next_page: bool,
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+pub(super) struct ScheduledEpisode {
+    pub(super) id: u32,
+    pub(super) episode: u32,
+    #[serde(rename = "airingAt", with = "chrono::serde::ts_seconds")]
+    pub(super) airing_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ScheduleMedia {
+    #[serde(rename = "airingSchedule")]
+    pub(super) airing_schedule: AiringSchedule,
 }
 
 #[cfg(test)]

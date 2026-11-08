@@ -13,6 +13,10 @@ query ($id: Int!) {
         startDate { year month day }
         nextAiringEpisode { episode airingAt }
         coverImage { medium }
+        airingSchedule(page: 1, perPage: 25) {
+            pageInfo { hasNextPage }
+            nodes { id episode airingAt }
+        }
         relations {
             edges {
                 relationType
@@ -24,6 +28,17 @@ query ($id: Int!) {
                     startDate { year month day }
                 }
             }
+        }
+    }
+}
+"#;
+
+const SCHEDULE_QUERY: &str = r#"
+query ($id: Int!, $page: Int!) {
+    Media(id: $id, type: ANIME) {
+        airingSchedule(page: $page, perPage: 25) {
+            pageInfo { hasNextPage }
+            nodes { id episode airingAt }
         }
     }
 }
@@ -45,6 +60,18 @@ impl AniListClient {
             "variables": { "id": id }
         });
 
+        let mut anime: Anime = self.request_media(body)?;
+        let first_page = anime.airing_schedule.take().ok_or_else(|| {
+            std::io::Error::other("AniList response is missing the airing schedule")
+        })?;
+        anime.scheduled_episodes = self.fetch_remaining_schedule(id, first_page)?;
+        Ok(anime)
+    }
+
+    fn request_media<T: serde::de::DeserializeOwned>(
+        &self,
+        body: serde_json::Value,
+    ) -> Result<T, Box<dyn std::error::Error>> {
         let response = self
             .http
             .post(&self.endpoint)
@@ -54,7 +81,50 @@ impl AniListClient {
             .error_for_status()?
             .text()?;
 
-        parse_anime(&response)
+        parse_media(&response)
+    }
+
+    fn fetch_remaining_schedule(
+        &self,
+        id: i32,
+        mut schedule: AiringSchedule,
+    ) -> Result<Vec<ScheduledEpisode>, Box<dyn std::error::Error>> {
+        let mut episodes = std::collections::BTreeMap::new();
+        let mut page = 1;
+
+        loop {
+            for episode in schedule.nodes {
+                if let Some(previous) = episodes.get(&episode.id) {
+                    if previous != &episode {
+                        return Err(std::io::Error::other(
+                            "AniList returned conflicting duplicate airing events",
+                        )
+                        .into());
+                    }
+                } else {
+                    episodes.insert(episode.id, episode);
+                }
+            }
+
+            if !schedule.page_info.has_next_page {
+                break;
+            }
+            if page >= 100 {
+                return Err(
+                    std::io::Error::other("AniList airing schedule exceeded 100 pages").into(),
+                );
+            }
+            page += 1;
+            let media: ScheduleMedia = self.request_media(serde_json::json!({
+                "query": SCHEDULE_QUERY,
+                "variables": { "id": id, "page": page }
+            }))?;
+            schedule = media.airing_schedule;
+        }
+
+        let mut episodes: Vec<_> = episodes.into_values().collect();
+        episodes.sort_by_key(|episode| (episode.airing_at, episode.id));
+        Ok(episodes)
     }
 
     pub(crate) fn fetch_sequel_chain(
@@ -99,7 +169,13 @@ impl AniListClient {
 }
 
 fn parse_anime(contents: &str) -> Result<Anime, Box<dyn std::error::Error>> {
-    let response: AniListResponse = serde_json::from_str(contents)?;
+    parse_media(contents)
+}
+
+fn parse_media<T: serde::de::DeserializeOwned>(
+    contents: &str,
+) -> Result<T, Box<dyn std::error::Error>> {
+    let response: AniListResponse<T> = serde_json::from_str(contents)?;
 
     if let Some(errors) = response.errors {
         if !errors.is_empty() {
@@ -126,21 +202,28 @@ fn parse_anime(contents: &str) -> Result<Anime, Box<dyn std::error::Error>> {
     Ok(anime)
 }
 
-pub(crate) fn season_snapshot(
+pub(crate) fn anime_snapshot(
     seasons: &[Anime],
 ) -> Result<SeriesSnapshot, Box<dyn std::error::Error>> {
     let mut releases = std::collections::BTreeMap::new();
 
     for season in seasons {
         releases.insert(format!("season:{}", season.id), season.release_record()?);
+
+        for episode in &season.scheduled_episodes {
+            releases.insert(
+                format!("episode:{}", episode.id),
+                episode.release_record(season),
+            );
+        }
     }
 
     Ok(SeriesSnapshot { releases })
 }
 
 #[derive(Debug, Deserialize)]
-struct AniListResponse {
-    data: Option<AniListData>,
+struct AniListResponse<T> {
+    data: Option<AniListData<T>>,
     errors: Option<Vec<GraphQlError>>,
 }
 
@@ -150,9 +233,9 @@ struct GraphQlError {
 }
 
 #[derive(Debug, Deserialize)]
-struct AniListData {
+struct AniListData<T> {
     #[serde(rename = "Media")]
-    media: Option<Anime>,
+    media: Option<T>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -166,11 +249,42 @@ pub(crate) struct Anime {
     relations: Option<AnimeRelations>,
     #[serde(rename = "coverImage")]
     cover_image: Option<AnimeCover>,
+    #[serde(rename = "airingSchedule")]
+    airing_schedule: Option<AiringSchedule>,
+    #[serde(skip)]
+    scheduled_episodes: Vec<ScheduledEpisode>,
 }
 
 #[derive(Debug, Deserialize)]
 struct AnimeCover {
     medium: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AiringSchedule {
+    #[serde(rename = "pageInfo")]
+    page_info: SchedulePageInfo,
+    nodes: Vec<ScheduledEpisode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScheduleMedia {
+    #[serde(rename = "airingSchedule")]
+    airing_schedule: AiringSchedule,
+}
+
+#[derive(Debug, Deserialize)]
+struct SchedulePageInfo {
+    #[serde(rename = "hasNextPage")]
+    has_next_page: bool,
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+struct ScheduledEpisode {
+    id: u32,
+    episode: u32,
+    #[serde(rename = "airingAt", with = "chrono::serde::ts_seconds")]
+    airing_at: DateTime<Utc>,
 }
 
 impl Anime {
@@ -322,9 +436,137 @@ pub(crate) struct AiringEpisode {
     pub(crate) airing_at: DateTime<Utc>,
 }
 
+impl ScheduledEpisode {
+    fn release_record(&self, season: &Anime) -> ReleaseRecord {
+        ReleaseRecord {
+            date: Some(ReleaseDate::Instant(self.airing_at)),
+            title: Some(format!("{} — Episode {}", season.title(), self.episode)),
+            image_url: season
+                .cover_image
+                .as_ref()
+                .and_then(|cover| cover.medium.clone()),
+            url: Some(format!("https://anilist.co/anime/{}", season.id)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fetches_all_schedule_pages_and_deduplicates_events() {
+        use wiremock::matchers::{body_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let shared = serde_json::json!({"id": 2, "episode": 2, "airingAt": 200});
+        for (query, variables, media) in [
+            (
+                ANIME_QUERY,
+                serde_json::json!({"id": 1}),
+                serde_json::json!({
+                    "id": 1, "title": {},
+                    "airingSchedule": {
+                        "pageInfo": {"hasNextPage": true},
+                        "nodes": [shared.clone()]
+                    }
+                }),
+            ),
+            (
+                SCHEDULE_QUERY,
+                serde_json::json!({"id": 1, "page": 2}),
+                serde_json::json!({
+                    "airingSchedule": {
+                        "pageInfo": {"hasNextPage": false},
+                        "nodes": [shared, {"id": 1, "episode": 1, "airingAt": 100}]
+                    }
+                }),
+            ),
+        ] {
+            Mock::given(method("POST"))
+                .and(body_json(serde_json::json!({
+                    "query": query, "variables": variables
+                })))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"data": {"Media": media}})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let endpoint = server.uri();
+        let anime = tokio::task::spawn_blocking(move || {
+            let http = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .unwrap();
+            AniListClient::new(http, endpoint).fetch_anime(1).unwrap()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            anime
+                .scheduled_episodes
+                .iter()
+                .map(|episode| episode.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn schedule_page_failure_does_not_return_partial_anime() {
+        use wiremock::matchers::{body_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_json(serde_json::json!({
+                "query": ANIME_QUERY, "variables": {"id": 1}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"Media": {
+                    "id": 1, "title": {},
+                    "airingSchedule": {
+                        "pageInfo": {"hasNextPage": true},
+                        "nodes": [{"id": 1, "episode": 1, "airingAt": 0}]
+                    }
+                }}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_json(serde_json::json!({
+                "query": SCHEDULE_QUERY, "variables": {"id": 1, "page": 2}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [{"message": "Too Many Requests."}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let endpoint = server.uri();
+        let error = tokio::task::spawn_blocking(move || {
+            let http = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .unwrap();
+            AniListClient::new(http, endpoint)
+                .fetch_anime(1)
+                .unwrap_err()
+                .to_string()
+        })
+        .await
+        .unwrap();
+        assert_eq!(error, "AniList GraphQL errors: Too Many Requests.");
+        server.verify().await;
+    }
 
     #[tokio::test]
     async fn fetches_anime_using_graphql() {
@@ -348,6 +590,10 @@ mod tests {
                             "english": null
                         },
                         "nextAiringEpisode": null,
+                        "airingSchedule": {
+                            "pageInfo": {"hasNextPage": false},
+                            "nodes": []
+                        },
                         "relations": {
                             "edges": [{
                                 "relationType": "SEQUEL",
@@ -538,6 +784,10 @@ mod tests {
                             "id": id,
                             "title": { "romaji": format!("Season {id}") },
                             "nextAiringEpisode": null,
+                            "airingSchedule": {
+                                "pageInfo": {"hasNextPage": false},
+                                "nodes": []
+                            },
                             "relations": {
                                 "edges": [{
                                     "relationType": "SEQUEL",
@@ -665,7 +915,7 @@ mod tests {
         ]))
         .unwrap();
 
-        let snapshot = season_snapshot(&seasons).unwrap();
+        let snapshot = anime_snapshot(&seasons).unwrap();
 
         assert_eq!(snapshot.releases.len(), 2);
         assert!(snapshot.releases.contains_key("season:182255"));
@@ -676,6 +926,47 @@ mod tests {
                 month: Some(10),
                 day: None,
             })
+        );
+    }
+
+    #[test]
+    fn snapshot_contains_episode_metadata() {
+        let mut anime = parse_anime(
+            r#"{
+        "data": {
+            "Media": {
+                "id": 154587,
+                "title": {"english": "Frieren"},
+                "coverImage": {
+                    "medium": "https://example.com/cover.jpg"
+                }
+            }
+        }
+    }"#,
+        )
+        .unwrap();
+
+        let airing_at = "2027-10-08T14:00:00Z".parse().unwrap();
+
+        anime.scheduled_episodes.push(ScheduledEpisode {
+            id: 1001,
+            episode: 7,
+            airing_at,
+        });
+
+        let snapshot = anime_snapshot(&[anime]).unwrap();
+        let record = &snapshot.releases["episode:1001"];
+
+        assert_eq!(snapshot.releases.len(), 2);
+        assert_eq!(record.date, Some(ReleaseDate::Instant(airing_at)));
+        assert_eq!(record.title.as_deref(), Some("Frieren — Episode 7"));
+        assert_eq!(
+            record.image_url.as_deref(),
+            Some("https://example.com/cover.jpg")
+        );
+        assert_eq!(
+            record.url.as_deref(),
+            Some("https://anilist.co/anime/154587")
         );
     }
 }

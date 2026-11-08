@@ -69,7 +69,7 @@ pub(crate) fn process_anilist_subscription(
 
     println!("=== anilist: {} ({id}) ===", subscription.name);
 
-    let snapshot = crate::anilist::season_snapshot(&seasons)?;
+    let snapshot = crate::anilist::anime_snapshot(&seasons)?;
     update_subscription(subscription, snapshot, state, today, messages);
 
     let updates = anime_updates(&seasons);

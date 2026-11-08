@@ -2,7 +2,7 @@ use crate::anilist::AniListClient;
 use crate::bubble::BubbleClient;
 use crate::config;
 use crate::notifier::{self, send_all};
-use crate::presentation::{anime_updates, show_upcoming};
+use crate::presentation::{anime_updates, episode_reminders, show_upcoming};
 use crate::state;
 use anyhow::{Context, Result};
 
@@ -90,7 +90,15 @@ pub(crate) fn process_anilist_subscription(
             subscription.name
         )
     })?;
+
+    let reminders = episode_reminders(&snapshot, today);
+
     update_subscription(subscription, snapshot, state, today, messages);
+
+    for message in reminders {
+        println!("    Reminder: {message}");
+        messages.push(message);
+    }
 
     let updates = anime_updates(&seasons);
     if updates.is_empty() {
@@ -219,5 +227,126 @@ mod tests {
         let successful = FakeNotifier { fail: false };
         notify_and_save(&successful, &messages, &updated, &path).unwrap();
         assert_eq!(state::TrackerState::load(&path).unwrap(), updated);
+    }
+
+    #[test]
+    fn episode_reminders_select_today_and_one_week_only() {
+        use crate::release_date::ReleaseDate;
+        use crate::state::{ReleaseRecord, SeriesSnapshot};
+        use chrono::{Duration, NaiveDate, TimeZone};
+        use std::collections::BTreeMap;
+
+        let today = NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+        let mut releases = BTreeMap::new();
+
+        for (episode, offset) in [(1, -1), (2, 0), (3, 6), (4, 7), (5, 8)] {
+            let date = today + Duration::days(offset);
+
+            // Local noon keeps the fixture independent of the machine's UTC offset.
+            let instant = chrono::Local
+                .from_local_datetime(&date.and_hms_opt(12, 0, 0).unwrap())
+                .single()
+                .unwrap()
+                .with_timezone(&chrono::Utc);
+
+            releases.insert(
+                format!("episode:{episode}"),
+                ReleaseRecord {
+                    date: Some(ReleaseDate::Instant(instant)),
+                    title: Some(format!("Example — Episode {episode}")),
+                    url: Some("https://anilist.co/anime/123".to_owned()),
+                    ..Default::default()
+                },
+            );
+        }
+
+        releases.insert(
+            "season:123".to_owned(),
+            ReleaseRecord {
+                date: Some(ReleaseDate::Date(today)),
+                ..Default::default()
+            },
+        );
+
+        let snapshot = SeriesSnapshot { releases };
+
+        assert_eq!(
+            episode_reminders(&snapshot, today),
+            vec![
+                "Example — Episode 2 airs today (2026-11-08)\nhttps://anilist.co/anime/123",
+                "Example — Episode 4 airs in one week (2026-11-15)\nhttps://anilist.co/anime/123",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn queues_episode_reminders_on_baseline_and_unchanged_runs() {
+        use chrono::{NaiveDate, TimeZone};
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let today = NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+        let airing_at = chrono::Local
+            .from_local_datetime(&today.and_hms_opt(12, 0, 0).unwrap())
+            .single()
+            .unwrap()
+            .timestamp();
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "Media": {
+                        "id": 123,
+                        "title": {"english": "Example"},
+                        "airingSchedule": {
+                            "pageInfo": {"hasNextPage": false},
+                            "nodes": [{
+                                "id": 456,
+                                "episode": 7,
+                                "airingAt": airing_at
+                            }]
+                        }
+                    }
+                }
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let endpoint = server.uri();
+        tokio::task::spawn_blocking(move || {
+            let client = AniListClient::new(reqwest::blocking::Client::new(), endpoint);
+            let subscription = config::Subscription {
+                provider: "anilist".to_owned(),
+                id: "123".to_owned(),
+                name: "Example".to_owned(),
+            };
+            let mut state = state::TrackerState::default();
+
+            for _ in 0..2 {
+                let mut messages = Vec::new();
+
+                process_anilist_subscription(
+                    &subscription,
+                    &client,
+                    &mut state,
+                    today,
+                    &mut messages,
+                )
+                .unwrap();
+
+                assert_eq!(
+                    messages,
+                    vec![
+                        "Example — Episode 7 airs today (2026-11-08)\nhttps://anilist.co/anime/123"
+                    ]
+                );
+            }
+        })
+        .await
+        .unwrap();
+
+        server.verify().await;
     }
 }

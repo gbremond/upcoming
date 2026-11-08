@@ -78,6 +78,40 @@ pub(crate) fn show_upcoming(
     }
 }
 
+pub(crate) fn episode_reminders(
+    snapshot: &crate::state::SeriesSnapshot,
+    today: chrono::NaiveDate,
+) -> Vec<String> {
+    let mut messages = Vec::new();
+
+    for (id, record) in &snapshot.releases {
+        if !id.starts_with("episode:") {
+            continue;
+        }
+
+        let Some(date) = record.date.as_ref().and_then(|date| date.reminder_date()) else {
+            continue;
+        };
+
+        let description = match reminder_for(date, today) {
+            Some(Reminder::Today) => "airs today",
+            Some(Reminder::InOneWeek) => "airs in one week",
+            None => continue,
+        };
+
+        let title = record.title.as_deref().unwrap_or("(untitled episode)");
+        let mut message = format!("{title} {description} ({date})");
+
+        if let Some(url) = &record.url {
+            message.push_str(&format!("\n{url}"));
+        }
+
+        messages.push(message);
+    }
+
+    messages
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

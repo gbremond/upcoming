@@ -233,7 +233,6 @@ query ($id: Int!) {
         id
         title { romaji english }
         startDate { year month day }
-        nextAiringEpisode { episode airingAt }
         coverImage { extraLarge }
         airingSchedule(page: 1, perPage: 25) {
             pageInfo { hasNextPage }
@@ -245,9 +244,6 @@ query ($id: Int!) {
                 node {
                     id
                     type
-                    title { romaji english }
-                    status
-                    startDate { year month day }
                 }
             }
         }
@@ -451,12 +447,9 @@ mod tests {
         let anime = client.fetch_anime(182255).await.unwrap();
 
         assert_eq!(anime.id, 182255);
-        assert!(anime.next_airing_episode.is_none());
-        let sequels = anime.announced_sequels();
+        let sequels = anime.sequels();
         assert_eq!(sequels.len(), 1);
         assert_eq!(sequels[0].id, 209939);
-        assert_eq!(sequels[0].title(), "Sousou no Frieren 3rd Season");
-        assert_eq!(sequels[0].release_window(), "2027-10 (day unknown)");
         server.verify().await;
     }
 

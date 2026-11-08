@@ -3,7 +3,6 @@ mod app;
 mod bubble;
 use bubble::BubbleClient;
 mod config;
-mod console;
 use config::{Config, parse_config};
 mod notifier;
 use notifier::DiscordClient;

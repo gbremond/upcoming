@@ -1,7 +1,6 @@
 use crate::anilist::{AniListClient, Anime};
 use crate::bubble::{BubbleClient, BubbleSeries};
 use crate::config;
-use crate::console::{album_overview, anime_overview, print_reminders, print_section};
 use crate::notifier::{self, NotificationReason, ReleaseNotification, send_all};
 use crate::reminder::{album_reminders, episode_reminders};
 use crate::state;
@@ -17,6 +16,7 @@ pub(crate) async fn run(
     state_path: &std::path::Path,
     today: chrono::NaiveDate,
 ) -> Result<()> {
+    let started = std::time::Instant::now();
     let mut state = state::TrackerState::load(state_path)?;
     let mut notifications = Vec::new();
 
@@ -37,7 +37,14 @@ pub(crate) async fn run(
         )?;
     }
 
-    notify_and_save(notifier, &notifications, &state, state_path).await
+    notify_and_save(notifier, &notifications, &state, state_path).await?;
+    tracing::info!(
+        subscriptions = subscriptions.len(),
+        notifications = notifications.len(),
+        elapsed = ?started.elapsed(),
+        "tracker run completed"
+    );
+    Ok(())
 }
 
 pub(crate) enum FetchedSeries {
@@ -117,22 +124,11 @@ pub(crate) fn apply_subscription(
     today: chrono::NaiveDate,
     notifications: &mut Vec<ReleaseNotification>,
 ) -> Result<()> {
-    println!(
-        "=== {}: {} ({}) ===",
-        subscription.provider, subscription.name, subscription.id
-    );
-
     match fetched {
         FetchedSeries::Bubble(series) => {
             let reminders = album_reminders(&series, &subscription.name, today);
             collect_changes(subscription, series.snapshot(), state, today, notifications);
-            print_reminders(&reminders);
             notifications.extend(reminders);
-
-            print_section(
-                &album_overview(&series, today),
-                "No upcoming albums with known publication dates.",
-            );
         }
         FetchedSeries::AniList(seasons) => {
             let snapshot = crate::anilist::anime_snapshot(&seasons).with_context(|| {
@@ -144,13 +140,7 @@ pub(crate) fn apply_subscription(
 
             let reminders = episode_reminders(&snapshot, &subscription.name, today);
             collect_changes(subscription, snapshot, state, today, notifications);
-            print_reminders(&reminders);
             notifications.extend(reminders);
-
-            print_section(
-                &anime_overview(&seasons),
-                "No scheduled episodes or announced sequels.",
-            );
         }
     }
 

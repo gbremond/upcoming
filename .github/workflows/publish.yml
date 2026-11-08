@@ -27,6 +27,9 @@ jobs:
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           rustup default stable
 
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
+
       - name: Check formatting
         run: cargo fmt --check
 

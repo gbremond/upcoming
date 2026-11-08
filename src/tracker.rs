@@ -162,6 +162,33 @@ pub(crate) fn apply_subscription(
     Ok(())
 }
 
+/// One full tracker pass: fetch every subscription concurrently, apply the
+/// results in config order, then notify and save.
+pub(crate) async fn run(
+    subscriptions: &[config::Subscription],
+    bubble_client: &BubbleClient,
+    anilist_client: &AniListClient,
+    notifier: &impl notifier::Notifier,
+    state_path: &std::path::Path,
+    today: chrono::NaiveDate,
+) -> Result<()> {
+    let mut state = state::TrackerState::load(state_path)?;
+    let mut messages = Vec::new();
+
+    let results = futures::future::join_all(
+        subscriptions
+            .iter()
+            .map(|subscription| fetch_subscription(subscription, bubble_client, anilist_client)),
+    )
+    .await;
+
+    for (subscription, fetched) in subscriptions.iter().zip(results) {
+        apply_subscription(subscription, fetched?, &mut state, today, &mut messages)?;
+    }
+
+    notify_and_save(notifier, &messages, &state, state_path).await
+}
+
 pub(crate) async fn notify_and_save(
     notifier: &impl notifier::Notifier,
     messages: &[ReleaseNotification],

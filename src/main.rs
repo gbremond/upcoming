@@ -9,12 +9,12 @@ mod presentation;
 mod release_date;
 mod reminder;
 mod request_pacing;
+#[cfg(test)]
+mod scenario_tests;
 mod state;
 use anyhow::{Context, Result};
 use std::{fs, time::Duration};
 mod tracker;
-use futures::future::join_all;
-use tracker::{apply_subscription, fetch_subscription, notify_and_save};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,25 +37,14 @@ async fn main() -> Result<()> {
         std::env::var("DISCORD_WEBHOOK_URL").unwrap_or_else(|_| "FAKE_KEY".to_owned());
     let notifier = DiscordClient::new(http, webhook_url);
 
-    let state_path = std::path::Path::new("state.json");
-    let mut state = state::TrackerState::load(state_path)?;
-
     let today = chrono::Local::now().date_naive();
-    let mut messages = Vec::new();
-
-    let results = join_all(
-        config
-            .subscriptions
-            .iter()
-            .map(|subscription| fetch_subscription(subscription, &bubble_client, &anilist_client)),
+    tracker::run(
+        &config.subscriptions,
+        &bubble_client,
+        &anilist_client,
+        &notifier,
+        std::path::Path::new("state.json"),
+        today,
     )
-    .await;
-
-    for (subscription, fetched) in config.subscriptions.iter().zip(results) {
-        apply_subscription(subscription, fetched?, &mut state, today, &mut messages)?;
-    }
-
-    notify_and_save(&notifier, &messages, &state, state_path).await?;
-
-    Ok(())
+    .await
 }

@@ -1,0 +1,19 @@
+{
+  "data": {
+    "Media": {
+      "id": 209939,
+      "title": {
+        "romaji": "Sousou no Frieren 3rd Season",
+        "english": null
+      },
+      "startDate": { "year": 2027, "month": 10, "day": null },
+      "nextAiringEpisode": null,
+      "coverImage": null,
+      "airingSchedule": {
+        "pageInfo": { "hasNextPage": false },
+        "nodes": []
+      },
+      "relations": { "edges": [] }
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "data": {
+    "Media": {
+      "id": 182255,
+      "title": {
+        "romaji": "Sousou no Frieren 2nd Season",
+        "english": null
+      },
+      "startDate": { "year": 2026, "month": 1, "day": 16 },
+      "nextAiringEpisode": null,
+      "coverImage": {
+        "extraLarge": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx182255.jpg"
+      },
+      "airingSchedule": {
+        "pageInfo": { "hasNextPage": false },
+        "nodes": []
+      },
+      "relations": {
+        "edges": [
+          {
+            "relationType": "SEQUEL",
+            "node": {
+              "id": 209939,
+              "type": "ANIME",
+              "title": {
+                "romaji": "Sousou no Frieren 3rd Season",
+                "english": null
+              },
+              "status": "NOT_YET_RELEASED",
+              "startDate": { "year": 2027, "month": 10, "day": null }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

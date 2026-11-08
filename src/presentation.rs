@@ -180,6 +180,49 @@ mod tests {
     }
 
     #[test]
+    fn anime_reminders_cover_episodes_but_not_seasons() {
+        use crate::release_date::ReleaseDate;
+        use crate::state::{ReleaseRecord, SeriesSnapshot};
+        use chrono::TimeZone;
+
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+        // Local noon keeps the fixture independent of the machine's UTC offset.
+        let airs_today = chrono::Local
+            .from_local_datetime(&today.and_hms_opt(12, 0, 0).unwrap())
+            .single()
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let episode = ReleaseRecord {
+            title: Some("Frieren — Episode 7".to_owned()),
+            date: Some(ReleaseDate::Instant(airs_today)),
+            ..Default::default()
+        };
+        let season = ReleaseRecord {
+            title: Some("Frieren Season 2".to_owned()),
+            date: Some(ReleaseDate::Date(today)),
+            ..Default::default()
+        };
+        let snapshot = SeriesSnapshot {
+            releases: [
+                ("episode:7".to_owned(), episode.clone()),
+                ("season:2".to_owned(), season),
+            ]
+            .into(),
+        };
+
+        let reminders = episode_reminders(&snapshot, "Frieren", today);
+
+        assert_eq!(
+            reminders.len(),
+            1,
+            "a season starting today is not reminded"
+        );
+        assert_eq!(reminders[0].subscription_name, "Frieren");
+        assert_eq!(reminders[0].release, episode);
+        assert!(matches!(reminders[0].reason, NotificationReason::Today));
+    }
+
+    #[test]
     fn anime_overview_shows_each_announcement_once() {
         let sequel = serde_json::json!({
             "relationType": "SEQUEL",

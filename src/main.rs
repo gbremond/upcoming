@@ -52,7 +52,18 @@ async fn main() -> Result<()> {
     let status = status::SharedStatus::default();
     let task_status = status.clone();
 
-    tokio::spawn(async move {
+    let shutdown = tokio_util::sync::CancellationToken::new();
+
+    tokio::spawn({
+        let shutdown = shutdown.clone();
+        async move {
+            shutdown_signal().await;
+            shutdown.cancel();
+        }
+    });
+
+    let task_shutdown = shutdown.clone();
+    let tracker = tokio::spawn(async move {
         loop {
             let today = chrono::Local::now();
             task_status.write().unwrap().run_started(today);
@@ -80,7 +91,10 @@ async fn main() -> Result<()> {
                 .unwrap()
                 .run_finished(after_run, &result, next);
             tracing::info!(next_run = %next.format("%d/%m/%Y %H:%M"), "tracker idle");
-            tokio::time::sleep((next - after_run).to_std().unwrap_or_default()).await;
+            tokio::select! {
+                _ = tokio::time::sleep((next - after_run).to_std().unwrap_or_default()) => {}
+                _ = task_shutdown.cancelled() => break,
+            }
         }
     });
 
@@ -90,11 +104,36 @@ async fn main() -> Result<()> {
         .with_state(status);
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     tracing::info!("listening on http://{}", listener.local_addr()?);
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown.cancelled_owned())
+        .await?;
+
+    tracker.await?; // wait for the current run to finish
+    tracing::info!("bye");
 
     Ok(())
 }
 
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to listen for Ctrl+C");
+    };
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to listen for SIGTERM")
+            .recv()
+            .await;
+    };
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("shutdown requested");
 }

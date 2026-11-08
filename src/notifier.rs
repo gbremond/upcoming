@@ -1,16 +1,16 @@
 use crate::release_date::ReleaseDate;
 use crate::state::ReleaseRecord;
 use anyhow::{Context, Result};
-use reqwest::blocking::Client;
+use reqwest::Client;
 
-pub(crate) fn send_all(
-    notifier: &dyn Notifier,
+pub(crate) async fn send_all(
+    notifier: &impl Notifier,
     messages: &[ReleaseNotification],
 ) -> Result<(), Vec<(usize, anyhow::Error)>> {
     let mut failures = Vec::new();
 
     for (index, message) in messages.iter().enumerate() {
-        if let Err(error) = notifier.send(message) {
+        if let Err(error) = notifier.send(message).await {
             failures.push((
                 index,
                 error.context(format!("Failed to send notification {}", index + 1)),
@@ -26,7 +26,7 @@ pub(crate) fn send_all(
 }
 
 pub(crate) trait Notifier {
-    fn send(&self, message: &ReleaseNotification) -> Result<()>;
+    async fn send(&self, message: &ReleaseNotification) -> Result<()>;
 }
 
 pub(crate) struct DiscordClient {
@@ -41,7 +41,7 @@ impl DiscordClient {
 }
 
 impl Notifier for DiscordClient {
-    fn send(&self, notification: &ReleaseNotification) -> Result<()> {
+    async fn send(&self, notification: &ReleaseNotification) -> Result<()> {
         let body = discord_payload(notification)?;
 
         self.http
@@ -49,6 +49,7 @@ impl Notifier for DiscordClient {
             .header("Content-Type", "application/json")
             .body(body.to_string())
             .send()
+            .await
             .map_err(|error| error.without_url())
             .context("Failed to send Discord webhook request")?
             .error_for_status()
@@ -287,14 +288,12 @@ mod tests {
             .mount(&server)
             .await;
         let url = format!("{}/webhook/test-secret", server.uri());
-        let error = tokio::task::spawn_blocking(move || {
+        let error = {
             let client = DiscordClient::new(Client::new(), url);
             let mut notification = sample_notification();
             notification.release.title = Some("x".repeat(257));
-            client.send(&notification).unwrap_err()
-        })
-        .await
-        .unwrap();
+            client.send(&notification).await.unwrap_err()
+        };
         assert!(error.to_string().contains("shorten the release title"));
         assert!(!format!("{error:#?}").contains("test-secret"));
         server.verify().await;
@@ -329,12 +328,10 @@ mod tests {
 
         let url = format!("{}/webhook", server.uri());
 
-        tokio::task::spawn_blocking(move || {
-            let client: &dyn Notifier = &DiscordClient::new(Client::new(), url);
-            client.send(&sample_notification()).unwrap();
-        })
-        .await
-        .unwrap();
+        DiscordClient::new(Client::new(), url)
+            .send(&sample_notification())
+            .await
+            .unwrap();
 
         server.verify().await;
     }
@@ -352,9 +349,9 @@ mod tests {
 
         let url = format!("{}/webhook/test-secret", server.uri());
 
-        let (status, error_message) = tokio::task::spawn_blocking(move || {
+        let (status, error_message) = {
             let client = DiscordClient::new(Client::new(), url);
-            let error = client.send(&sample_notification()).unwrap_err();
+            let error = client.send(&sample_notification()).await.unwrap_err();
 
             let status = error
                 .downcast_ref::<reqwest::Error>()
@@ -362,9 +359,7 @@ mod tests {
                 .status();
 
             (status, format!("{error:#?}"))
-        })
-        .await
-        .unwrap();
+        };
 
         assert_eq!(status, Some(reqwest::StatusCode::INTERNAL_SERVER_ERROR));
         assert!(!error_message.contains("test-secret"));
@@ -372,8 +367,8 @@ mod tests {
         server.verify().await;
     }
 
-    #[test]
-    fn attempts_remaining_messages_after_a_failure() {
+    #[tokio::test]
+    async fn attempts_remaining_messages_after_a_failure() {
         use std::cell::RefCell;
 
         struct TestNotifier {
@@ -381,7 +376,7 @@ mod tests {
         }
 
         impl Notifier for TestNotifier {
-            fn send(&self, notification: &ReleaseNotification) -> Result<()> {
+            async fn send(&self, notification: &ReleaseNotification) -> Result<()> {
                 self.attempted
                     .borrow_mut()
                     .push(notification.subscription_name.clone());
@@ -405,7 +400,7 @@ mod tests {
             })
             .collect();
 
-        let failures = send_all(&notifier, &messages).unwrap_err();
+        let failures = send_all(&notifier, &messages).await.unwrap_err();
 
         assert_eq!(
             *notifier.attempted.borrow(),
@@ -447,7 +442,7 @@ mod tests {
             .await;
 
         let url = format!("{}/webhook", server.uri());
-        tokio::task::spawn_blocking(move || {
+        {
             let client = DiscordClient::new(Client::new(), url);
             let notification = ReleaseNotification {
                 subscription_name: "Example".to_owned(),
@@ -461,10 +456,8 @@ mod tests {
                 },
                 reason: NotificationReason::DateChanged { old_date: None },
             };
-            client.send(&notification).unwrap();
-        })
-        .await
-        .unwrap();
+            client.send(&notification).await.unwrap();
+        };
         server.verify().await;
     }
 

@@ -8,24 +8,29 @@ use notifier::DiscordClient;
 mod presentation;
 mod release_date;
 mod reminder;
+mod request_pacing;
 mod state;
 use anyhow::{Context, Result};
-use std::fs;
+use std::{fs, time::Duration};
 mod tracker;
 use tracker::{notify_and_save, process_anilist_subscription, process_bubble_subscription};
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let contents =
         fs::read_to_string("subscriptions.yaml").context("Failed to read subscriptions.yaml")?;
     let config: Config = parse_config(&contents).context("Failed to parse subscriptions.yaml")?;
 
-    let http = reqwest::blocking::Client::builder()
+    let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .context("Failed to build HTTP client")?;
     let bubble_client = BubbleClient::new(http.clone(), "https://api.bubblebd.com/v1.6".to_owned());
-    let anilist_client =
-        anilist::AniListClient::new(http.clone(), "https://graphql.anilist.co".to_owned());
+    let anilist_client = anilist::AniListClient::new(
+        http.clone(),
+        "https://graphql.anilist.co".to_owned(),
+        Duration::from_secs(1),
+    );
 
     let webhook_url =
         std::env::var("DISCORD_WEBHOOK_URL").unwrap_or_else(|_| "FAKE_KEY".to_owned());
@@ -39,20 +44,26 @@ fn main() -> Result<()> {
 
     for subscription in &config.subscriptions {
         match subscription.provider.as_str() {
-            "bubble" => process_bubble_subscription(
-                subscription,
-                &bubble_client,
-                &mut state,
-                today,
-                &mut messages,
-            )?,
-            "anilist" => process_anilist_subscription(
-                subscription,
-                &anilist_client,
-                &mut state,
-                today,
-                &mut messages,
-            )?,
+            "bubble" => {
+                process_bubble_subscription(
+                    subscription,
+                    &bubble_client,
+                    &mut state,
+                    today,
+                    &mut messages,
+                )
+                .await?
+            }
+            "anilist" => {
+                process_anilist_subscription(
+                    subscription,
+                    &anilist_client,
+                    &mut state,
+                    today,
+                    &mut messages,
+                )
+                .await?
+            }
             provider => {
                 anyhow::bail!(
                     "Unsupported provider '{provider}' for subscription '{}'",
@@ -62,7 +73,7 @@ fn main() -> Result<()> {
         }
     }
 
-    notify_and_save(&notifier, &messages, &state, state_path)?;
+    notify_and_save(&notifier, &messages, &state, state_path).await?;
 
     Ok(())
 }

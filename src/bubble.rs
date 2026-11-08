@@ -5,24 +5,26 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
 
 impl BubbleClient {
-    pub fn new(http_client: reqwest::blocking::Client, base_url: String) -> Self {
+    pub fn new(http_client: reqwest::Client, base_url: String) -> Self {
         Self {
             http_client,
             base_url,
         }
     }
 
-    pub fn fetch_bubble_series(&self, id: &str) -> Result<BubbleSeries> {
+    pub async fn fetch_bubble_series(&self, id: &str) -> Result<BubbleSeries> {
         let url = format!("{}/series/{id}", self.base_url.trim_end_matches('/'));
 
         let response = self
             .http_client
             .get(url)
             .send()
+            .await
             .with_context(|| format!("Failed to send Bubble series request for {id}"))?
             .error_for_status()
             .with_context(|| format!("Bubble series request for {id} returned an HTTP error"))?
             .text()
+            .await
             .with_context(|| format!("Failed to read Bubble series response for {id}"))?;
 
         parse_bubble_series(&response)
@@ -35,7 +37,7 @@ fn parse_bubble_series(contents: &str) -> Result<BubbleSeries, serde_json::Error
 }
 
 pub struct BubbleClient {
-    http_client: reqwest::blocking::Client,
+    http_client: reqwest::Client,
     base_url: String,
 }
 
@@ -235,13 +237,11 @@ mod tests {
 
         let base_url = format!("{}/v1.6/", server.uri());
 
-        let series = tokio::task::spawn_blocking(move || {
+        let series = {
             let client = test_client(base_url);
 
-            client.fetch_bubble_series("example-id").unwrap()
-        })
-        .await
-        .unwrap();
+            client.fetch_bubble_series("example-id").await.unwrap()
+        };
 
         assert!(series.albums.is_empty());
 
@@ -261,17 +261,15 @@ mod tests {
 
         let base_url = format!("{}/v1.6", server.uri());
 
-        let status = tokio::task::spawn_blocking(move || {
+        let status = {
             let client = test_client(base_url);
-            let error = client.fetch_bubble_series("example-id").unwrap_err();
+            let error = client.fetch_bubble_series("example-id").await.unwrap_err();
 
             error
                 .downcast_ref::<reqwest::Error>()
                 .expect("expected a Reqwest error")
                 .status()
-        })
-        .await
-        .unwrap();
+        };
 
         assert_eq!(status, Some(reqwest::StatusCode::INTERNAL_SERVER_ERROR));
 
@@ -279,7 +277,7 @@ mod tests {
     }
 
     fn test_client(base_url: String) -> BubbleClient {
-        let http_client = reqwest::blocking::Client::builder()
+        let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(2))
             .build()
             .unwrap();

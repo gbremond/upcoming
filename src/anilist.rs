@@ -1,11 +1,12 @@
 use crate::release_date::ReleaseDate;
+use crate::request_pacing::RequestGate;
 use crate::state::{ReleaseRecord, SeriesSnapshot};
 use anyhow::{Context, Result};
-use chrono::NaiveDate;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use reqwest::StatusCode;
 use serde::Deserialize;
 use std::collections::{HashSet, VecDeque};
+use std::time::Duration;
 
 const ANIME_QUERY: &str = r#"
 query ($id: Int!) {
@@ -47,16 +48,21 @@ query ($id: Int!, $page: Int!) {
 "#;
 
 pub(crate) struct AniListClient {
-    http: reqwest::blocking::Client,
+    http: reqwest::Client,
     endpoint: String,
+    gate: RequestGate,
 }
 
 impl AniListClient {
-    pub(crate) fn new(http: reqwest::blocking::Client, endpoint: String) -> Self {
-        Self { http, endpoint }
+    pub(crate) fn new(http: reqwest::Client, endpoint: String, interval: Duration) -> Self {
+        Self {
+            http,
+            endpoint,
+            gate: RequestGate::new(interval),
+        }
     }
 
-    pub(crate) fn fetch_anime(&self, id: i32) -> Result<Anime> {
+    pub(crate) async fn fetch_anime(&self, id: i32) -> Result<Anime> {
         let body = serde_json::json!({
             "query": ANIME_QUERY,
             "variables": { "id": id }
@@ -64,51 +70,73 @@ impl AniListClient {
 
         let mut anime: Anime = self
             .request_media(body)
+            .await
             .with_context(|| format!("Failed to fetch anime {id}, airing schedule page 1"))?;
         let first_page = anime.airing_schedule.take().ok_or_else(|| {
             anyhow::anyhow!("AniList response for anime {id} is missing the airing schedule")
         })?;
-        anime.scheduled_episodes = self.fetch_remaining_schedule(id, first_page)?;
+        anime.scheduled_episodes = self.fetch_remaining_schedule(id, first_page).await?;
         Ok(anime)
     }
 
-    fn request_media<T: serde::de::DeserializeOwned>(&self, body: serde_json::Value) -> Result<T> {
-        let response = self
-            .http
-            .post(&self.endpoint)
-            .header("Content-Type", "application/json")
-            .body(body.to_string())
-            .send()
-            .context("Failed to send AniList GraphQL request")?;
+    async fn request_media<T: serde::de::DeserializeOwned>(
+        &self,
+        body: serde_json::Value,
+    ) -> Result<T> {
+        let body = body.to_string();
+        let mut attempt = 1;
 
-        if response.status() == StatusCode::TOO_MANY_REQUESTS {
-            let guidance = match response
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<u64>().ok())
-            {
-                Some(seconds) => format!(
-                    "AniList rate limit reached (429); wait at least {seconds} seconds before rerunning. No automatic retry was attempted"
-                ),
-                None => "AniList rate limit reached (429); Retry-After is missing or invalid. Wait at least 60 seconds before trying again; the cooldown may be longer. No automatic retry was attempted".to_owned(),
-            };
-            response
-                .error_for_status_ref()
-                .context("AniList GraphQL request returned an HTTP error")
-                .context(guidance)?;
+        loop {
+            self.gate.wait().await;
+
+            let response = self
+                .http
+                .post(&self.endpoint)
+                .header("Content-Type", "application/json")
+                .body(body.clone())
+                .send()
+                .await
+                .context("Failed to send AniList GraphQL request")?;
+
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.parse::<u64>().ok());
+
+                if attempt == 1 {
+                    // Pausing the shared gate also holds back concurrent requests.
+                    self.gate
+                        .pause(Duration::from_secs(retry_after.unwrap_or(60)));
+                    attempt += 1;
+                    continue;
+                }
+
+                let guidance = match retry_after {
+                    Some(seconds) => format!(
+                        "AniList rate limit reached (429) again after one automatic retry; wait at least {seconds} seconds before rerunning"
+                    ),
+                    None => "AniList rate limit reached (429) again after one automatic retry; Retry-After is missing or invalid. Wait at least 60 seconds before trying again; the cooldown may be longer".to_owned(),
+                };
+                response
+                    .error_for_status_ref()
+                    .context("AniList GraphQL request returned an HTTP error")
+                    .context(guidance)?;
+            }
+
+            let text = response
+                .error_for_status()
+                .context("AniList GraphQL request returned an HTTP error")?
+                .text()
+                .await
+                .context("Failed to read AniList GraphQL response")?;
+
+            return parse_media(&text);
         }
-
-        let body = response
-            .error_for_status()
-            .context("AniList GraphQL request returned an HTTP error")?
-            .text()
-            .context("Failed to read AniList GraphQL response")?;
-
-        parse_media(&body)
     }
 
-    fn fetch_remaining_schedule(
+    async fn fetch_remaining_schedule(
         &self,
         id: i32,
         mut schedule: AiringSchedule,
@@ -142,6 +170,7 @@ impl AniListClient {
                     "query": SCHEDULE_QUERY,
                     "variables": { "id": id, "page": page }
                 }))
+                .await
                 .with_context(|| {
                     format!("Failed to fetch airing schedule for anime {id}, page {page}")
                 })?;
@@ -153,7 +182,7 @@ impl AniListClient {
         Ok(episodes)
     }
 
-    pub(crate) fn fetch_sequel_chain(&self, root_id: i32) -> Result<Vec<Anime>> {
+    pub(crate) async fn fetch_sequel_chain(&self, root_id: i32) -> Result<Vec<Anime>> {
         if root_id <= 0 {
             anyhow::bail!("AniList ID must be positive");
         }
@@ -172,7 +201,7 @@ impl AniListClient {
             }
 
             visited.insert(id);
-            let anime = self.fetch_anime(id).with_context(|| {
+            let anime = self.fetch_anime(id).await.with_context(|| {
                 format!("Failed to fetch season {id} in sequel chain rooted at {root_id}")
             })?;
 
@@ -481,8 +510,8 @@ mod tests {
         parse_media(contents)
     }
 
-    #[tokio::test]
-    async fn http_429_retains_request_context_and_explains_when_to_rerun() {
+    #[tokio::test(start_paused = true)]
+    async fn http_429_retries_once_then_explains_when_to_rerun() {
         use wiremock::matchers::{body_json, method};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -495,23 +524,23 @@ mod tests {
                 "query": ANIME_QUERY, "variables": {"id": 123}
             })))
             .respond_with(response)
-            .expect(1)
+            .expect(2)
             .mount(&server)
             .await;
 
         let endpoint = server.uri();
-        let error = tokio::task::spawn_blocking(move || {
-            let client = AniListClient::new(reqwest::blocking::Client::new(), endpoint);
-            client.fetch_anime(123).unwrap_err()
-        })
-        .await
-        .unwrap();
+        let start = tokio::time::Instant::now();
+        let error = {
+            let client = AniListClient::new(reqwest::Client::new(), endpoint, Duration::ZERO);
+            client.fetch_anime(123).await.unwrap_err()
+        };
 
+        assert!(start.elapsed() >= Duration::from_secs(30));
         let chain = format!("{error:#}");
         assert!(chain.contains("Failed to fetch anime 123, airing schedule page 1"));
         assert!(chain.contains("AniList GraphQL request returned an HTTP error"));
+        assert!(chain.contains("again after one automatic retry"));
         assert!(chain.contains("wait at least 30 seconds before rerunning"));
-        assert!(chain.contains("No automatic retry was attempted"));
         assert_eq!(
             error.downcast_ref::<reqwest::Error>().unwrap().status(),
             Some(reqwest::StatusCode::TOO_MANY_REQUESTS)
@@ -519,7 +548,39 @@ mod tests {
         server.verify().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
+    async fn http_429_waits_for_retry_after_then_succeeds() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "5"))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"Media": {
+                    "id": 123, "title": {},
+                    "airingSchedule": {"pageInfo": {"hasNextPage": false}, "nodes": []}
+                }}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = AniListClient::new(reqwest::Client::new(), server.uri(), Duration::ZERO);
+        let start = tokio::time::Instant::now();
+        let anime = client.fetch_anime(123).await.unwrap();
+
+        assert_eq!(anime.id, 123);
+        assert!(start.elapsed() >= Duration::from_secs(5));
+        server.verify().await;
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn http_429_with_missing_or_invalid_retry_after_gives_conservative_guidance() {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -532,18 +593,19 @@ mod tests {
             }
             Mock::given(method("POST"))
                 .respond_with(response)
-                .expect(1)
+                .expect(2)
                 .mount(&server)
                 .await;
             let endpoint = server.uri();
-            let error = tokio::task::spawn_blocking(move || {
-                AniListClient::new(reqwest::blocking::Client::new(), endpoint)
+            let start = tokio::time::Instant::now();
+            let error = {
+                AniListClient::new(reqwest::Client::new(), endpoint, Duration::ZERO)
                     .fetch_anime(123)
+                    .await
                     .unwrap_err()
-            })
-            .await
-            .unwrap();
+            };
 
+            assert!(start.elapsed() >= Duration::from_secs(60));
             let chain = format!("{error:#}");
             assert!(chain.contains("Retry-After is missing or invalid"));
             assert!(chain.contains("Wait at least 60 seconds"));
@@ -583,17 +645,15 @@ mod tests {
                 "query": SCHEDULE_QUERY, "variables": {"id": 123, "page": 2}
             })))
             .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
-            .expect(1)
+            .expect(2)
             .mount(&server)
             .await;
 
         let endpoint = server.uri();
-        let error = tokio::task::spawn_blocking(move || {
-            let client = AniListClient::new(reqwest::blocking::Client::new(), endpoint);
-            client.fetch_anime(123).unwrap_err()
-        })
-        .await
-        .unwrap();
+        let error = {
+            let client = AniListClient::new(reqwest::Client::new(), endpoint, Duration::ZERO);
+            client.fetch_anime(123).await.unwrap_err()
+        };
 
         assert!(
             format!("{error:#}").contains("Failed to fetch airing schedule for anime 123, page 2")
@@ -648,15 +708,16 @@ mod tests {
                 .await;
         }
         let endpoint = server.uri();
-        let anime = tokio::task::spawn_blocking(move || {
-            let http = reqwest::blocking::Client::builder()
+        let anime = {
+            let http = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(2))
                 .build()
                 .unwrap();
-            AniListClient::new(http, endpoint).fetch_anime(1).unwrap()
-        })
-        .await
-        .unwrap();
+            AniListClient::new(http, endpoint, Duration::ZERO)
+                .fetch_anime(1)
+                .await
+                .unwrap()
+        };
 
         assert_eq!(
             anime
@@ -703,18 +764,17 @@ mod tests {
             .await;
 
         let endpoint = server.uri();
-        let error = tokio::task::spawn_blocking(move || {
-            let http = reqwest::blocking::Client::builder()
+        let error = {
+            let http = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(2))
                 .build()
                 .unwrap();
-            let error = AniListClient::new(http, endpoint)
+            let error = AniListClient::new(http, endpoint, Duration::ZERO)
                 .fetch_anime(1)
+                .await
                 .unwrap_err();
             format!("{error:#}")
-        })
-        .await
-        .unwrap();
+        };
         assert!(error.contains("Failed to fetch airing schedule for anime 1, page 2"));
         assert!(error.contains("AniList GraphQL errors: Too Many Requests."));
         server.verify().await;
@@ -770,17 +830,15 @@ mod tests {
 
         let endpoint = format!("{}/graphql", server.uri());
 
-        let anime = tokio::task::spawn_blocking(move || {
-            let http = reqwest::blocking::Client::builder()
+        let anime = {
+            let http = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(2))
                 .build()
                 .unwrap();
 
-            let client = AniListClient::new(http, endpoint);
-            client.fetch_anime(182255).unwrap()
-        })
-        .await
-        .unwrap();
+            let client = AniListClient::new(http, endpoint, Duration::ZERO);
+            client.fetch_anime(182255).await.unwrap()
+        };
 
         assert_eq!(anime.id, 182255);
         assert!(anime.next_airing_episode.is_none());
@@ -961,17 +1019,15 @@ mod tests {
 
         let endpoint = server.uri();
 
-        let seasons = tokio::task::spawn_blocking(move || {
-            let http = reqwest::blocking::Client::builder()
+        let seasons = {
+            let http = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(2))
                 .build()
                 .unwrap();
 
-            let client = AniListClient::new(http, endpoint);
-            client.fetch_sequel_chain(1).unwrap()
-        })
-        .await
-        .unwrap();
+            let client = AniListClient::new(http, endpoint, Duration::ZERO);
+            client.fetch_sequel_chain(1).await.unwrap()
+        };
 
         let ids: Vec<u32> = seasons.iter().map(|anime| anime.id).collect();
         assert_eq!(ids, vec![1, 2, 3]);

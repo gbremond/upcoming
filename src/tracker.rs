@@ -41,7 +41,7 @@ fn update_subscription(
     }
 }
 
-pub(crate) fn process_bubble_subscription(
+pub(crate) async fn process_bubble_subscription(
     subscription: &config::Subscription,
     bubble_client: &BubbleClient,
     state: &mut state::TrackerState,
@@ -55,6 +55,7 @@ pub(crate) fn process_bubble_subscription(
 
     let series = bubble_client
         .fetch_bubble_series(&subscription.id)
+        .await
         .with_context(|| {
             format!(
                 "Failed to fetch Bubble subscription '{}' ({})",
@@ -69,7 +70,7 @@ pub(crate) fn process_bubble_subscription(
     Ok(())
 }
 
-pub(crate) fn process_anilist_subscription(
+pub(crate) async fn process_anilist_subscription(
     subscription: &config::Subscription,
     client: &AniListClient,
     state: &mut state::TrackerState,
@@ -90,7 +91,7 @@ pub(crate) fn process_anilist_subscription(
         );
     }
 
-    let seasons = client.fetch_sequel_chain(id).with_context(|| {
+    let seasons = client.fetch_sequel_chain(id).await.with_context(|| {
         format!(
             "Failed to fetch AniList subscription '{}' ({id})",
             subscription.name
@@ -127,13 +128,13 @@ pub(crate) fn process_anilist_subscription(
     Ok(())
 }
 
-pub(crate) fn notify_and_save(
-    notifier: &dyn notifier::Notifier,
+pub(crate) async fn notify_and_save(
+    notifier: &impl notifier::Notifier,
     messages: &[ReleaseNotification],
     state: &state::TrackerState,
     path: &std::path::Path,
 ) -> Result<()> {
-    if let Err(failures) = send_all(notifier, messages) {
+    if let Err(failures) = send_all(notifier, messages).await {
         for (index, error) in &failures {
             eprintln!("Notification {} failed: {error:#}", index + 1);
         }
@@ -152,14 +153,14 @@ pub(crate) fn notify_and_save(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, time::Duration};
 
     struct FakeNotifier {
         fail: bool,
     }
 
     impl notifier::Notifier for FakeNotifier {
-        fn send(&self, _message: &ReleaseNotification) -> Result<()> {
+        async fn send(&self, _message: &ReleaseNotification) -> Result<()> {
             if self.fail {
                 anyhow::bail!("delivery failed");
             }
@@ -234,13 +235,13 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
-            .expect(1)
+            .expect(2)
             .mount(&server)
             .await;
 
         let endpoint = server.uri();
-        let error = tokio::task::spawn_blocking(move || {
-            let client = AniListClient::new(reqwest::blocking::Client::new(), endpoint);
+        let error = {
+            let client = AniListClient::new(reqwest::Client::new(), endpoint, Duration::ZERO);
             let subscription = config::Subscription {
                 provider: "anilist".to_owned(),
                 id: "123".to_owned(),
@@ -255,14 +256,13 @@ mod tests {
                 chrono::NaiveDate::from_ymd_opt(2026, 11, 8).unwrap(),
                 &mut messages,
             )
+            .await
             .unwrap_err();
 
             assert!(state.providers.is_empty());
             assert!(messages.is_empty());
             error
-        })
-        .await
-        .unwrap();
+        };
 
         let chain = format!("{error:#}");
         assert!(chain.contains("AniList subscription 'Test anime' (123)"));
@@ -276,8 +276,8 @@ mod tests {
         server.verify().await;
     }
 
-    #[test]
-    fn saves_state_only_after_successful_delivery() {
+    #[tokio::test]
+    async fn saves_state_only_after_successful_delivery() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
 
@@ -298,7 +298,9 @@ mod tests {
         }];
 
         let failing = FakeNotifier { fail: true };
-        let error = notify_and_save(&failing, &messages, &updated, &path).unwrap_err();
+        let error = notify_and_save(&failing, &messages, &updated, &path)
+            .await
+            .unwrap_err();
         let chain = format!("{error:#}");
         assert!(chain.contains("state was not saved"));
         assert!(chain.contains("Failed to send notification 1"));
@@ -306,7 +308,9 @@ mod tests {
         assert_eq!(state::TrackerState::load(&path).unwrap(), previous);
 
         let successful = FakeNotifier { fail: false };
-        notify_and_save(&successful, &messages, &updated, &path).unwrap();
+        notify_and_save(&successful, &messages, &updated, &path)
+            .await
+            .unwrap();
         assert_eq!(state::TrackerState::load(&path).unwrap(), updated);
     }
 
@@ -400,8 +404,8 @@ mod tests {
             .await;
 
         let endpoint = server.uri();
-        tokio::task::spawn_blocking(move || {
-            let client = AniListClient::new(reqwest::blocking::Client::new(), endpoint);
+        {
+            let client = AniListClient::new(reqwest::Client::new(), endpoint, Duration::ZERO);
             let subscription = config::Subscription {
                 provider: "anilist".to_owned(),
                 id: "123".to_owned(),
@@ -419,6 +423,7 @@ mod tests {
                     today,
                     &mut messages,
                 )
+                .await
                 .unwrap();
 
                 assert_eq!(messages.len(), 1);
@@ -440,9 +445,7 @@ mod tests {
                 );
                 assert!(matches!(notification.reason, NotificationReason::Today));
             }
-        })
-        .await
-        .unwrap();
+        };
 
         server.verify().await;
     }

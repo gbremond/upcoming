@@ -1,5 +1,6 @@
 mod anilist;
-mod app;
+mod api;
+use api::status;
 mod bubble;
 use bubble::BubbleClient;
 mod config;
@@ -7,7 +8,6 @@ use config::{Config, parse_config};
 mod notifier;
 use notifier::DiscordClient;
 mod release_date;
-mod releases;
 mod reminder;
 mod request_pacing;
 #[cfg(test)]
@@ -16,8 +16,6 @@ mod state;
 use anyhow::{Context, Result};
 use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 mod schedule;
-mod status;
-mod subscriptions;
 mod tracker;
 
 #[tokio::main]
@@ -104,7 +102,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    let app = app::router(app::AppState {
+    let app = api::router(api::AppState {
         status,
         subscriptions,
         state_path,

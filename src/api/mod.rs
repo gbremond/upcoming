@@ -1,7 +1,9 @@
+mod releases;
+pub(crate) mod status;
+mod subscriptions;
+
+use self::status::SharedStatus;
 use crate::config::Subscription;
-use crate::releases;
-use crate::status::{self, SharedStatus};
-use crate::subscriptions;
 use axum::Router;
 use axum::extract::FromRef;
 use axum::routing::get;

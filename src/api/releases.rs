@@ -1,7 +1,7 @@
-use crate::app::AppState;
+use super::AppState;
+use super::subscriptions::{Release, SeriesRecords, release};
 use crate::config::Subscription;
 use crate::state::TrackerState;
-use crate::subscriptions::{Release, SeriesRecords, release};
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -261,7 +261,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let state_path = directory.path().join("state.json");
         state.save(&state_path).unwrap();
-        let app = crate::app::router(AppState {
+        let app = crate::api::router(AppState {
             status: Default::default(),
             subscriptions: Arc::new(vec![subscription("a", "Anime")]),
             state_path,

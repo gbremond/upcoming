@@ -1,4 +1,4 @@
-use crate::app::AppState;
+use super::AppState;
 use crate::config::Subscription;
 use crate::release_date::ReleaseDate;
 use crate::state::{ReleaseRecord, TrackerState};
@@ -540,7 +540,7 @@ mod tests {
         )])
         .save(&state_path)
         .unwrap();
-        let app = crate::app::router(AppState {
+        let app = crate::api::router(AppState {
             status: Default::default(),
             subscriptions: Arc::new(vec![subscription("bubble", "5t", "Les 5 Terres")]),
             state_path,
@@ -578,7 +578,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let state_path = directory.path().join("state.json");
         std::fs::write(&state_path, "not json").unwrap();
-        let app = crate::app::router(AppState {
+        let app = crate::api::router(AppState {
             status: Default::default(),
             subscriptions: Arc::new(vec![]),
             state_path,

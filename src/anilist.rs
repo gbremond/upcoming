@@ -3,6 +3,7 @@ use crate::state::{ReleaseRecord, SeriesSnapshot};
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use chrono::{DateTime, Utc};
+use reqwest::StatusCode;
 use serde::Deserialize;
 use std::collections::{HashSet, VecDeque};
 
@@ -78,13 +79,33 @@ impl AniListClient {
             .header("Content-Type", "application/json")
             .body(body.to_string())
             .send()
-            .context("Failed to send AniList GraphQL request")?
+            .context("Failed to send AniList GraphQL request")?;
+
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            let guidance = match response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+            {
+                Some(seconds) => format!(
+                    "AniList rate limit reached (429); wait at least {seconds} seconds before rerunning. No automatic retry was attempted"
+                ),
+                None => "AniList rate limit reached (429); Retry-After is missing or invalid. Wait at least 60 seconds before trying again; the cooldown may be longer. No automatic retry was attempted".to_owned(),
+            };
+            response
+                .error_for_status_ref()
+                .context("AniList GraphQL request returned an HTTP error")
+                .context(guidance)?;
+        }
+
+        let body = response
             .error_for_status()
             .context("AniList GraphQL request returned an HTTP error")?
             .text()
             .context("Failed to read AniList GraphQL response")?;
 
-        parse_media(&response)
+        parse_media(&body)
     }
 
     fn fetch_remaining_schedule(
@@ -457,6 +478,130 @@ mod tests {
 
     fn parse_anime(contents: &str) -> Result<Anime> {
         parse_media(contents)
+    }
+
+    #[tokio::test]
+    async fn http_429_retains_request_context_and_explains_when_to_rerun() {
+        use wiremock::matchers::{body_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let response = ResponseTemplate::new(429)
+            .set_body_json(serde_json::json!({"errors": [{"message": "Too Many Requests."}]}))
+            .insert_header("Retry-After", "30");
+        Mock::given(method("POST"))
+            .and(body_json(serde_json::json!({
+                "query": ANIME_QUERY, "variables": {"id": 123}
+            })))
+            .respond_with(response)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let endpoint = server.uri();
+        let error = tokio::task::spawn_blocking(move || {
+            let client = AniListClient::new(reqwest::blocking::Client::new(), endpoint);
+            client.fetch_anime(123).unwrap_err()
+        })
+        .await
+        .unwrap();
+
+        let chain = format!("{error:#}");
+        assert!(chain.contains("Failed to fetch anime 123, airing schedule page 1"));
+        assert!(chain.contains("AniList GraphQL request returned an HTTP error"));
+        assert!(chain.contains("wait at least 30 seconds before rerunning"));
+        assert!(chain.contains("No automatic retry was attempted"));
+        assert_eq!(
+            error.downcast_ref::<reqwest::Error>().unwrap().status(),
+            Some(reqwest::StatusCode::TOO_MANY_REQUESTS)
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn http_429_with_missing_or_invalid_retry_after_gives_conservative_guidance() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for header in [None, Some("invalid")] {
+            let server = MockServer::start().await;
+            let mut response = ResponseTemplate::new(429);
+            if let Some(value) = header {
+                response = response.insert_header("Retry-After", value);
+            }
+            Mock::given(method("POST"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let endpoint = server.uri();
+            let error = tokio::task::spawn_blocking(move || {
+                AniListClient::new(reqwest::blocking::Client::new(), endpoint)
+                    .fetch_anime(123)
+                    .unwrap_err()
+            })
+            .await
+            .unwrap();
+
+            let chain = format!("{error:#}");
+            assert!(chain.contains("Retry-After is missing or invalid"));
+            assert!(chain.contains("Wait at least 60 seconds"));
+            assert!(chain.contains("cooldown may be longer"));
+            assert_eq!(
+                error.downcast_ref::<reqwest::Error>().unwrap().status(),
+                Some(StatusCode::TOO_MANY_REQUESTS)
+            );
+            server.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn schedule_http_429_retains_page_context_and_returns_no_partial_anime() {
+        use wiremock::matchers::{body_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_json(serde_json::json!({
+                "query": ANIME_QUERY, "variables": {"id": 123}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"Media": {
+                    "id": 123, "title": {},
+                    "airingSchedule": {
+                        "pageInfo": {"hasNextPage": true},
+                        "nodes": [{"id": 1, "episode": 1, "airingAt": 100}]
+                    }
+                }}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_json(serde_json::json!({
+                "query": SCHEDULE_QUERY, "variables": {"id": 123, "page": 2}
+            })))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let endpoint = server.uri();
+        let error = tokio::task::spawn_blocking(move || {
+            let client = AniListClient::new(reqwest::blocking::Client::new(), endpoint);
+            client.fetch_anime(123).unwrap_err()
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            format!("{error:#}").contains("Failed to fetch airing schedule for anime 123, page 2")
+        );
+        assert_eq!(
+            error.downcast_ref::<reqwest::Error>().unwrap().status(),
+            Some(reqwest::StatusCode::TOO_MANY_REQUESTS)
+        );
+        server.verify().await;
     }
 
     #[tokio::test]

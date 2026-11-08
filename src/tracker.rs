@@ -151,7 +151,7 @@ mod tests {
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(429))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
             .expect(1)
             .mount(&server)
             .await;

@@ -27,7 +27,7 @@ pub(crate) enum ReleaseChange {
     },
 }
 
-#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ReleaseRecord {
     pub(crate) date: Option<ReleaseDate>,
     pub(crate) title: Option<String>,

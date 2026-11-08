@@ -14,7 +14,7 @@ query ($id: Int!) {
         title { romaji english }
         startDate { year month day }
         nextAiringEpisode { episode airingAt }
-        coverImage { medium }
+        coverImage { extraLarge }
         airingSchedule(page: 1, perPage: 25) {
             pageInfo { hasNextPage }
             nodes { id episode airingAt }
@@ -278,7 +278,8 @@ pub(crate) struct Anime {
 
 #[derive(Debug, Deserialize)]
 struct AnimeCover {
-    medium: Option<String>,
+    #[serde(rename = "extraLarge")]
+    extra_large: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -354,7 +355,7 @@ impl Anime {
             image_url: self
                 .cover_image
                 .as_ref()
-                .and_then(|cover| cover.medium.clone()),
+                .and_then(|cover| cover.extra_large.clone()),
             url: Some(format!("https://anilist.co/anime/{}", self.id)),
         })
     }
@@ -466,7 +467,7 @@ impl ScheduledEpisode {
             image_url: season
                 .cover_image
                 .as_ref()
-                .and_then(|cover| cover.medium.clone()),
+                .and_then(|cover| cover.extra_large.clone()),
             url: Some(format!("https://anilist.co/anime/{}", season.id)),
         }
     }
@@ -1089,7 +1090,7 @@ mod tests {
                 "id": 154587,
                 "title": {"english": "Frieren"},
                 "coverImage": {
-                    "medium": "https://example.com/cover.jpg"
+                    "extraLarge": "https://example.com/cover.jpg"
                 }
             }
         }

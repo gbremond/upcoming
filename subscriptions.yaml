@@ -17,12 +17,12 @@ subscriptions:
   - provider: anilist
     id: 161645
     name: Apothecary Diaries
-  - provider: anilist
-    id: 151807
-    name: Solo Leveling
-  - provider: anilist
-    id: 147105
-    name: Witch Hat Atelier
-  - provider: anilist
-    id: 101922
-    name: Demon Slayer
+  # - provider: anilist
+  #   id: 151807
+  #   name: Solo Leveling
+  # - provider: anilist
+  #   id: 147105
+  #   name: Witch Hat Atelier
+  # - provider: anilist
+  #   id: 101922
+  #   name: Demon Slayer

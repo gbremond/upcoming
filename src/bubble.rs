@@ -93,17 +93,7 @@ impl BubbleSeries {
         let releases = self
             .albums
             .iter()
-            .map(|album| {
-                (
-                    album.id.clone(),
-                    ReleaseRecord {
-                        date: album.first_publication_date().map(ReleaseDate::Date),
-                        title: album.title.clone(),
-                        image_url: album.cover_url().map(str::to_owned),
-                        url: album.page_url(),
-                    },
-                )
-            })
+            .map(|album| (album.id.clone(), album.release_record()))
             .collect();
 
         SeriesSnapshot { releases }
@@ -135,6 +125,21 @@ impl BubbleAlbum {
             "https://www.bubblebd.com/{permalink}/album/{}/{print_id}",
             self.id
         ))
+    }
+
+    pub(crate) fn release_record(&self) -> ReleaseRecord {
+        ReleaseRecord {
+            date: self.first_publication_date().map(ReleaseDate::Date),
+            title: Some(format!(
+                "{} — {}",
+                self.tome
+                    .map(|number| format!("T{number:02}"))
+                    .unwrap_or_else(|| "Unnumbered".to_owned()),
+                self.title.as_deref().unwrap_or("(untitled)")
+            )),
+            image_url: self.cover_url().map(str::to_owned),
+            url: self.page_url(),
+        }
     }
 }
 

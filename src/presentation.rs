@@ -1,3 +1,4 @@
+use crate::notifier::{NotificationReason, ReleaseNotification};
 use crate::reminder::{Reminder, reminder_for};
 use crate::{anilist, bubble};
 
@@ -36,7 +37,7 @@ pub(crate) fn show_upcoming(
     series: &bubble::BubbleSeries,
     subscription_name: &str,
     today: chrono::NaiveDate,
-    messages: &mut Vec<String>,
+    messages: &mut Vec<ReleaseNotification>,
 ) {
     let upcoming = series.upcoming_albums(today);
 
@@ -73,16 +74,24 @@ pub(crate) fn show_upcoming(
 
             let message = format!("{subscription_name} — {tome} — {title} {description} ({date})");
             println!("    Reminder: {message}");
-            messages.push(message);
+            messages.push(ReleaseNotification {
+                subscription_name: subscription_name.to_owned(),
+                release: album.release_record(),
+                reason: match reminder {
+                    Reminder::Today => NotificationReason::Today,
+                    Reminder::InOneWeek => NotificationReason::InOneWeek,
+                },
+            });
         }
     }
 }
 
 pub(crate) fn episode_reminders(
     snapshot: &crate::state::SeriesSnapshot,
+    subscription_name: &str,
     today: chrono::NaiveDate,
-) -> Vec<String> {
-    let mut messages = Vec::new();
+) -> Vec<ReleaseNotification> {
+    let mut notifications = Vec::new();
 
     for (id, record) in &snapshot.releases {
         if !id.starts_with("episode:") {
@@ -93,28 +102,82 @@ pub(crate) fn episode_reminders(
             continue;
         };
 
-        let description = match reminder_for(date, today) {
-            Some(Reminder::Today) => "airs today",
-            Some(Reminder::InOneWeek) => "airs in one week",
+        let reason = match reminder_for(date, today) {
+            Some(Reminder::Today) => NotificationReason::Today,
+            Some(Reminder::InOneWeek) => NotificationReason::InOneWeek,
             None => continue,
         };
 
-        let title = record.title.as_deref().unwrap_or("(untitled episode)");
-        let mut message = format!("{title} {description} ({date})");
-
-        if let Some(url) = &record.url {
-            message.push_str(&format!("\n{url}"));
-        }
-
-        messages.push(message);
+        notifications.push(ReleaseNotification {
+            subscription_name: subscription_name.to_owned(),
+            release: record.clone(),
+            reason,
+        });
     }
 
-    messages
+    notifications
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bubble_reminders_preserve_series_tome_cover_link_and_timing() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+        let series: bubble::BubbleSeries = serde_json::from_value(serde_json::json!({
+            "albums": [
+                {
+                    "objectId": "today", "title": "Shin Taku", "tome": 2,
+                    "prints": [{"publicationDate": "2026-11-08T00:00:00Z"}],
+                    "images": {"front": {"medium": "https://example.com/cover.jpg"}},
+                    "permalink": "les-5-terres", "defaultSellingPrintObjectId": "print-2"
+                },
+                {
+                    "objectId": "week", "title": "Next tome", "tome": 3,
+                    "prints": [{"publicationDate": "2026-11-15T00:00:00Z"}]
+                },
+                {
+                    "objectId": "later", "title": "Later", "tome": 4,
+                    "prints": [{"publicationDate": "2026-11-16T00:00:00Z"}]
+                }
+            ]
+        }))
+        .unwrap();
+        let mut notifications = Vec::new();
+        show_upcoming(
+            &series,
+            "Les 5 Terres (hors série)",
+            today,
+            &mut notifications,
+        );
+        assert_eq!(notifications.len(), 2);
+        for notification in &notifications {
+            assert_eq!(notification.subscription_name, "Les 5 Terres (hors série)");
+        }
+        assert_eq!(
+            notifications[0].release.title.as_deref(),
+            Some("T02 — Shin Taku")
+        );
+        assert_eq!(
+            notifications[0].release.image_url.as_deref(),
+            Some("https://example.com/cover.jpg")
+        );
+        assert_eq!(
+            notifications[0].release.url.as_deref(),
+            Some("https://www.bubblebd.com/les-5-terres/album/today/print-2")
+        );
+        assert!(matches!(notifications[0].reason, NotificationReason::Today));
+        assert!(matches!(
+            notifications[1].reason,
+            NotificationReason::InOneWeek
+        ));
+        assert_eq!(
+            notifications[0].release,
+            series.snapshot().releases["today"]
+        );
+        assert_eq!(notifications[1].release, series.snapshot().releases["week"]);
+    }
 
     #[test]
     fn anime_overview_shows_each_announcement_once() {

@@ -1,7 +1,7 @@
 use crate::anilist::AniListClient;
 use crate::bubble::BubbleClient;
 use crate::config;
-use crate::notifier::{self, send_all};
+use crate::notifier::{self, NotificationReason, ReleaseNotification, send_all};
 use crate::presentation::{anime_updates, episode_reminders, show_upcoming};
 use crate::state;
 use anyhow::{Context, Result};
@@ -11,15 +11,30 @@ fn update_subscription(
     snapshot: state::SeriesSnapshot,
     state: &mut state::TrackerState,
     today: chrono::NaiveDate,
-    messages: &mut Vec<String>,
+    messages: &mut Vec<ReleaseNotification>,
 ) {
     match state.update_series(&subscription.provider, &subscription.id, snapshot) {
         Some(changes) => {
             for change in changes {
-                if change.should_notify(today) {
-                    println!("  Relevant change: {change:?}");
-                    messages.push(format!("{}: {change:?}", subscription.name));
+                if !change.should_notify(today) {
+                    continue;
                 }
+
+                let (id, reason) = match change {
+                    state::ReleaseChange::Added { id, .. } => (id, NotificationReason::Added),
+                    state::ReleaseChange::DateChanged { id, old_date, .. } => {
+                        (id, NotificationReason::DateChanged { old_date })
+                    }
+                };
+
+                let release =
+                    state.providers[&subscription.provider][&subscription.id].releases[&id].clone();
+
+                messages.push(ReleaseNotification {
+                    subscription_name: subscription.name.clone(),
+                    release,
+                    reason,
+                });
             }
         }
         None => println!("  First run for this subscription: saving baseline."),
@@ -31,7 +46,7 @@ pub(crate) fn process_bubble_subscription(
     bubble_client: &BubbleClient,
     state: &mut state::TrackerState,
     today: chrono::NaiveDate,
-    messages: &mut Vec<String>,
+    messages: &mut Vec<ReleaseNotification>,
 ) -> Result<()> {
     println!(
         "=== {}: {} ({}) ===",
@@ -59,7 +74,7 @@ pub(crate) fn process_anilist_subscription(
     client: &AniListClient,
     state: &mut state::TrackerState,
     today: chrono::NaiveDate,
-    messages: &mut Vec<String>,
+    messages: &mut Vec<ReleaseNotification>,
 ) -> Result<()> {
     let id = subscription.id.parse::<i32>().with_context(|| {
         format!(
@@ -91,13 +106,13 @@ pub(crate) fn process_anilist_subscription(
         )
     })?;
 
-    let reminders = episode_reminders(&snapshot, today);
+    let reminders = episode_reminders(&snapshot, &subscription.name, today);
 
     update_subscription(subscription, snapshot, state, today, messages);
 
-    for message in reminders {
-        println!("    Reminder: {message}");
-        messages.push(message);
+    for notification in reminders {
+        println!("    Reminder: {:?}", notification);
+        messages.push(notification);
     }
 
     let updates = anime_updates(&seasons);
@@ -114,7 +129,7 @@ pub(crate) fn process_anilist_subscription(
 
 pub(crate) fn notify_and_save(
     notifier: &dyn notifier::Notifier,
-    messages: &[String],
+    messages: &[ReleaseNotification],
     state: &state::TrackerState,
     path: &std::path::Path,
 ) -> Result<()> {
@@ -144,11 +159,70 @@ mod tests {
     }
 
     impl notifier::Notifier for FakeNotifier {
-        fn send(&self, _message: &str) -> Result<()> {
+        fn send(&self, _message: &ReleaseNotification) -> Result<()> {
             if self.fail {
                 anyhow::bail!("delivery failed");
             }
             Ok(())
+        }
+    }
+
+    #[test]
+    fn change_notifications_keep_release_metadata_and_previous_date() {
+        use crate::release_date::ReleaseDate;
+
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+        let old_date = ReleaseDate::Date(today + chrono::Duration::days(7));
+        let new_date = ReleaseDate::Date(today + chrono::Duration::days(14));
+        let record = state::ReleaseRecord {
+            title: Some("T02 — Shin Taku".to_owned()),
+            date: Some(old_date.clone()),
+            image_url: Some("https://example.com/cover.jpg".to_owned()),
+            url: Some("https://example.com/album".to_owned()),
+        };
+        let subscription = config::Subscription {
+            provider: "bubble".to_owned(),
+            id: "series".to_owned(),
+            name: "Les 5 Terres".to_owned(),
+        };
+        let mut state = state::TrackerState::default();
+        let mut notifications = Vec::new();
+        update_subscription(
+            &subscription,
+            state::SeriesSnapshot {
+                releases: BTreeMap::from([("album".to_owned(), record.clone())]),
+            },
+            &mut state,
+            today,
+            &mut notifications,
+        );
+        assert!(notifications.is_empty());
+        let changed = state::ReleaseRecord {
+            date: Some(new_date),
+            ..record.clone()
+        };
+        update_subscription(
+            &subscription,
+            state::SeriesSnapshot {
+                releases: BTreeMap::from([
+                    ("album".to_owned(), changed.clone()),
+                    ("new".to_owned(), record.clone()),
+                ]),
+            },
+            &mut state,
+            today,
+            &mut notifications,
+        );
+        assert_eq!(notifications.len(), 2);
+        assert_eq!(notifications[0].release, changed);
+        assert!(matches!(
+            &notifications[0].reason,
+            NotificationReason::DateChanged { old_date: Some(date) } if date == &old_date
+        ));
+        assert_eq!(notifications[1].release, record);
+        assert!(matches!(notifications[1].reason, NotificationReason::Added));
+        for notification in &notifications {
+            assert_eq!(notification.subscription_name, "Les 5 Terres");
         }
     }
 
@@ -214,7 +288,14 @@ mod tests {
         updated
             .providers
             .insert("bubble".to_owned(), BTreeMap::new());
-        let messages = vec!["New release".to_owned()];
+        let messages = vec![ReleaseNotification {
+            subscription_name: "Example".to_owned(),
+            release: state::ReleaseRecord {
+                title: Some("New release".to_owned()),
+                ..Default::default()
+            },
+            reason: NotificationReason::Added,
+        }];
 
         let failing = FakeNotifier { fail: true };
         let error = notify_and_save(&failing, &messages, &updated, &path).unwrap_err();
@@ -270,13 +351,17 @@ mod tests {
 
         let snapshot = SeriesSnapshot { releases };
 
-        assert_eq!(
-            episode_reminders(&snapshot, today),
-            vec![
-                "Example — Episode 2 airs today (2026-11-08)\nhttps://anilist.co/anime/123",
-                "Example — Episode 4 airs in one week (2026-11-15)\nhttps://anilist.co/anime/123",
-            ]
-        );
+        let notifications = episode_reminders(&snapshot, "Example", today);
+        assert_eq!(notifications.len(), 2);
+        for (notification, id) in notifications.iter().zip(["episode:2", "episode:4"]) {
+            assert_eq!(notification.subscription_name, "Example");
+            assert_eq!(notification.release, snapshot.releases[id]);
+        }
+        assert!(matches!(notifications[0].reason, NotificationReason::Today));
+        assert!(matches!(
+            notifications[1].reason,
+            NotificationReason::InOneWeek
+        ));
     }
 
     #[tokio::test]
@@ -336,12 +421,24 @@ mod tests {
                 )
                 .unwrap();
 
+                assert_eq!(messages.len(), 1);
+                let notification = &messages[0];
+                assert_eq!(notification.subscription_name, "Example");
                 assert_eq!(
-                    messages,
-                    vec![
-                        "Example — Episode 7 airs today (2026-11-08)\nhttps://anilist.co/anime/123"
-                    ]
+                    notification.release.title.as_deref(),
+                    Some("Example — Episode 7")
                 );
+                assert_eq!(
+                    notification.release.url.as_deref(),
+                    Some("https://anilist.co/anime/123")
+                );
+                assert_eq!(
+                    notification.release.date,
+                    Some(crate::release_date::ReleaseDate::Instant(
+                        chrono::DateTime::from_timestamp(airing_at, 0).unwrap()
+                    ))
+                );
+                assert!(matches!(notification.reason, NotificationReason::Today));
             }
         })
         .await

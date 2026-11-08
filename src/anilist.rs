@@ -1,3 +1,6 @@
+use crate::release_date::ReleaseDate;
+use crate::state::{ReleaseRecord, SeriesSnapshot};
+use chrono::NaiveDate;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::collections::{HashSet, VecDeque};
@@ -7,7 +10,9 @@ query ($id: Int!) {
     Media(id: $id, type: ANIME) {
         id
         title { romaji english }
+        startDate { year month day }
         nextAiringEpisode { episode airingAt }
+        coverImage { medium }
         relations {
             edges {
                 relationType
@@ -121,6 +126,18 @@ fn parse_anime(contents: &str) -> Result<Anime, Box<dyn std::error::Error>> {
     Ok(anime)
 }
 
+pub(crate) fn season_snapshot(
+    seasons: &[Anime],
+) -> Result<SeriesSnapshot, Box<dyn std::error::Error>> {
+    let mut releases = std::collections::BTreeMap::new();
+
+    for season in seasons {
+        releases.insert(format!("season:{}", season.id), season.release_record()?);
+    }
+
+    Ok(SeriesSnapshot { releases })
+}
+
 #[derive(Debug, Deserialize)]
 struct AniListResponse {
     data: Option<AniListData>,
@@ -142,9 +159,18 @@ struct AniListData {
 pub(crate) struct Anime {
     id: u32,
     title: AnimeTitle,
+    #[serde(rename = "startDate")]
+    start_date: Option<PartialDate>,
     #[serde(rename = "nextAiringEpisode")]
     pub(crate) next_airing_episode: Option<AiringEpisode>,
     relations: Option<AnimeRelations>,
+    #[serde(rename = "coverImage")]
+    cover_image: Option<AnimeCover>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnimeCover {
+    medium: Option<String>,
 }
 
 impl Anime {
@@ -172,6 +198,30 @@ impl Anime {
             .as_deref()
             .or(self.title.romaji.as_deref())
             .unwrap_or("(untitled)")
+    }
+
+    fn release_record(&self) -> Result<ReleaseRecord, Box<dyn std::error::Error>> {
+        let date = match &self.start_date {
+            Some(date) => date.to_release_date()?,
+            None => None,
+        };
+
+        let title = self
+            .title
+            .english
+            .as_ref()
+            .or(self.title.romaji.as_ref())
+            .cloned();
+
+        Ok(ReleaseRecord {
+            date,
+            title,
+            image_url: self
+                .cover_image
+                .as_ref()
+                .and_then(|cover| cover.medium.clone()),
+            url: Some(format!("https://anilist.co/anime/{}", self.id)),
+        })
     }
 }
 
@@ -238,6 +288,23 @@ impl PartialDate {
                 self.day
                     .map_or("unknown".to_owned(), |value| value.to_string()),
             ),
+        }
+    }
+
+    fn to_release_date(&self) -> Result<Option<ReleaseDate>, Box<dyn std::error::Error>> {
+        match (self.year, self.month, self.day) {
+            (None, None, None) => Ok(None),
+            (Some(year), Some(month), Some(day)) => {
+                let date = NaiveDate::from_ymd_opt(year, month, day)
+                    .ok_or_else(|| std::io::Error::other("Invalid AniList start date"))?;
+
+                Ok(Some(ReleaseDate::Date(date)))
+            }
+            _ => Ok(Some(ReleaseDate::Partial {
+                year: self.year,
+                month: self.month,
+                day: self.day,
+            })),
         }
     }
 }
@@ -508,5 +575,107 @@ mod tests {
         assert_eq!(ids, vec![1, 2, 3]);
 
         server.verify().await;
+    }
+
+    #[test]
+    fn converts_an_announced_month_without_inventing_a_day() {
+        let date = PartialDate {
+            year: Some(2027),
+            month: Some(10),
+            day: None,
+        };
+
+        assert_eq!(
+            date.to_release_date().unwrap(),
+            Some(ReleaseDate::Partial {
+                year: Some(2027),
+                month: Some(10),
+                day: None,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_an_invalid_complete_start_date() {
+        let date = PartialDate {
+            year: Some(2027),
+            month: Some(2),
+            day: Some(30),
+        };
+
+        assert!(date.to_release_date().is_err());
+    }
+
+    #[test]
+    fn season_record_preserves_an_announced_month() {
+        let anime = parse_anime(
+            r#"{
+        "data": {
+            "Media": {
+                "id": 209939,
+                "title": {
+                    "romaji": "Sousou no Frieren 3rd Season",
+                    "english": null
+                },
+                "startDate": {
+                    "year": 2027,
+                    "month": 10,
+                    "day": null
+                }
+            }
+        }
+    }"#,
+        )
+        .unwrap();
+
+        let record = anime.release_record().unwrap();
+
+        assert_eq!(
+            record.date,
+            Some(ReleaseDate::Partial {
+                year: Some(2027),
+                month: Some(10),
+                day: None,
+            })
+        );
+        assert_eq!(
+            record.title.as_deref(),
+            Some("Sousou no Frieren 3rd Season")
+        );
+        assert_eq!(
+            record.url.as_deref(),
+            Some("https://anilist.co/anime/209939")
+        );
+        assert!(record.image_url.is_none());
+    }
+
+    #[test]
+    fn snapshot_contains_each_season() {
+        let seasons: Vec<Anime> = serde_json::from_value(serde_json::json!([
+            {
+                "id": 182255,
+                "title": {"english": "Frieren Season 2"},
+                "startDate": {"year": 2026, "month": 1, "day": 16}
+            },
+            {
+                "id": 209939,
+                "title": {"romaji": "Sousou no Frieren 3rd Season"},
+                "startDate": {"year": 2027, "month": 10, "day": null}
+            }
+        ]))
+        .unwrap();
+
+        let snapshot = season_snapshot(&seasons).unwrap();
+
+        assert_eq!(snapshot.releases.len(), 2);
+        assert!(snapshot.releases.contains_key("season:182255"));
+        assert_eq!(
+            snapshot.releases["season:209939"].date,
+            Some(ReleaseDate::Partial {
+                year: Some(2027),
+                month: Some(10),
+                day: None,
+            })
+        );
     }
 }

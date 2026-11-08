@@ -6,6 +6,26 @@ use crate::presentation::{anime_updates, show_upcoming};
 use crate::state;
 use std::error::Error;
 
+fn update_subscription(
+    subscription: &config::Subscription,
+    snapshot: state::SeriesSnapshot,
+    state: &mut state::TrackerState,
+    today: chrono::NaiveDate,
+    messages: &mut Vec<String>,
+) {
+    match state.update_series(&subscription.provider, &subscription.id, snapshot) {
+        Some(changes) => {
+            for change in changes {
+                if change.should_notify(today) {
+                    println!("  Relevant change: {change:?}");
+                    messages.push(format!("{}: {change:?}", subscription.name));
+                }
+            }
+        }
+        None => println!("  First run for this subscription: saving baseline."),
+    }
+}
+
 pub(crate) fn process_bubble_subscription(
     subscription: &config::Subscription,
     bubble_client: &BubbleClient,
@@ -20,17 +40,7 @@ pub(crate) fn process_bubble_subscription(
 
     let series = bubble_client.fetch_bubble_series(&subscription.id)?;
 
-    match state.update_series(&subscription.provider, &subscription.id, series.snapshot()) {
-        Some(changes) => {
-            for change in changes {
-                if change.should_notify(today) {
-                    println!("  Relevant change: {change:?}");
-                    messages.push(format!("{}: {change:?}", subscription.name));
-                }
-            }
-        }
-        None => println!("  First run for this subscription: saving baseline."),
-    }
+    update_subscription(subscription, series.snapshot(), state, today, messages);
 
     show_upcoming(&series, &subscription.name, today, messages);
 
@@ -40,6 +50,9 @@ pub(crate) fn process_bubble_subscription(
 pub(crate) fn process_anilist_subscription(
     subscription: &config::Subscription,
     client: &AniListClient,
+    state: &mut state::TrackerState,
+    today: chrono::NaiveDate,
+    messages: &mut Vec<String>,
 ) -> Result<(), Box<dyn Error>> {
     let id = subscription.id.parse::<i32>().map_err(|error| {
         std::io::Error::other(format!(
@@ -55,6 +68,9 @@ pub(crate) fn process_anilist_subscription(
     let seasons = client.fetch_sequel_chain(id)?;
 
     println!("=== anilist: {} ({id}) ===", subscription.name);
+
+    let snapshot = crate::anilist::season_snapshot(&seasons)?;
+    update_subscription(subscription, snapshot, state, today, messages);
 
     let updates = anime_updates(&seasons);
     if updates.is_empty() {

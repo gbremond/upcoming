@@ -44,7 +44,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 today,
                 &mut messages,
             )?,
-            "anilist" => process_anilist_subscription(subscription, &anilist_client)?,
+            "anilist" => process_anilist_subscription(
+                subscription,
+                &anilist_client,
+                &mut state,
+                today,
+                &mut messages,
+            )?,
             provider => {
                 return Err(format!("Unsupported provider: {provider}").into());
             }

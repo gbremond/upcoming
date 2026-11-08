@@ -1,3 +1,4 @@
+use crate::release_date::ReleaseDate;
 use crate::state::{ReleaseRecord, SeriesSnapshot};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
@@ -95,7 +96,7 @@ impl BubbleSeries {
                 (
                     album.id.clone(),
                     ReleaseRecord {
-                        date: album.first_publication_date(),
+                        date: album.first_publication_date().map(ReleaseDate::Date),
                         title: album.title.clone(),
                         image_url: album.cover_url().map(str::to_owned),
                         url: album.page_url(),

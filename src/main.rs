@@ -6,6 +6,7 @@ use config::{Config, parse_config};
 mod notifier;
 use notifier::DiscordClient;
 mod presentation;
+mod release_date;
 mod reminder;
 mod state;
 use std::error::Error;

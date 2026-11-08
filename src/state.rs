@@ -1,3 +1,4 @@
+use crate::release_date::ReleaseDate;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -16,18 +17,18 @@ pub(crate) struct SeriesSnapshot {
 pub(crate) enum ReleaseChange {
     Added {
         id: String,
-        date: Option<NaiveDate>,
+        date: Option<ReleaseDate>,
     },
     DateChanged {
         id: String,
-        old_date: Option<NaiveDate>,
-        new_date: Option<NaiveDate>,
+        old_date: Option<ReleaseDate>,
+        new_date: Option<ReleaseDate>,
     },
 }
 
 #[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ReleaseRecord {
-    pub(crate) date: Option<NaiveDate>,
+    pub(crate) date: Option<ReleaseDate>,
     pub(crate) title: Option<String>,
     pub(crate) image_url: Option<String>,
     pub(crate) url: Option<String>,
@@ -85,13 +86,13 @@ impl SeriesSnapshot {
             match previous.releases.get(id) {
                 None => changes.push(ReleaseChange::Added {
                     id: id.clone(),
-                    date: current.date,
+                    date: current.date.clone(),
                 }),
                 Some(old) if old.date != current.date => {
                     changes.push(ReleaseChange::DateChanged {
                         id: id.clone(),
-                        old_date: old.date,
-                        new_date: current.date,
+                        old_date: old.date.clone(),
+                        new_date: current.date.clone(),
                     });
                 }
                 Some(_) => {}
@@ -104,18 +105,18 @@ impl SeriesSnapshot {
 
 impl ReleaseChange {
     pub(crate) fn should_notify(&self, today: NaiveDate) -> bool {
-        fn relevant(date: Option<NaiveDate>, today: NaiveDate) -> bool {
-            match date {
+        fn relevant(date: Option<&ReleaseDate>, today: NaiveDate) -> bool {
+            match date.and_then(ReleaseDate::reminder_date) {
                 Some(date) => date >= today,
                 None => true,
             }
         }
 
         match self {
-            ReleaseChange::Added { date, .. } => relevant(*date, today),
+            ReleaseChange::Added { date, .. } => relevant(date.as_ref(), today),
             ReleaseChange::DateChanged {
                 old_date, new_date, ..
-            } => relevant(*old_date, today) || relevant(*new_date, today),
+            } => relevant(old_date.as_ref(), today) || relevant(new_date.as_ref(), today),
         }
     }
 }
@@ -240,7 +241,7 @@ mod tests {
                 ReleaseChange::DateChanged {
                     id: "announced".to_owned(),
                     old_date: None,
-                    new_date: Some(date),
+                    new_date: Some(ReleaseDate::Date(date)),
                 },
                 ReleaseChange::Added {
                     id: "new".to_owned(),
@@ -270,7 +271,7 @@ mod tests {
             Some(vec![ReleaseChange::DateChanged {
                 id: "album-1".to_owned(),
                 old_date: None,
-                new_date: Some(date),
+                new_date: Some(ReleaseDate::Date(date)),
             }])
         );
     }
@@ -300,7 +301,7 @@ mod tests {
             Some(vec![ReleaseChange::DateChanged {
                 id: "album-1".to_owned(),
                 old_date: None,
-                new_date: Some(date),
+                new_date: Some(ReleaseDate::Date(date)),
             }])
         );
     }
@@ -315,14 +316,14 @@ mod tests {
             date,
         };
 
-        assert!(added(Some(today)).should_notify(today));
+        assert!(added(Some(ReleaseDate::Date(today))).should_notify(today));
         assert!(added(None).should_notify(today));
-        assert!(!added(Some(past)).should_notify(today));
+        assert!(!added(Some(ReleaseDate::Date(past))).should_notify(today));
 
         let moved_to_past = ReleaseChange::DateChanged {
             id: "album-1".to_owned(),
-            old_date: Some(today),
-            new_date: Some(past),
+            old_date: Some(ReleaseDate::Date(today)),
+            new_date: Some(ReleaseDate::Date(past)),
         };
 
         assert!(moved_to_past.should_notify(today));
@@ -330,7 +331,7 @@ mod tests {
 
     fn record(date: Option<NaiveDate>) -> ReleaseRecord {
         ReleaseRecord {
-            date,
+            date: date.map(ReleaseDate::Date),
             ..ReleaseRecord::default()
         }
     }

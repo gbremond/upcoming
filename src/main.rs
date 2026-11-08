@@ -1,4 +1,5 @@
 mod anilist;
+mod app;
 mod bubble;
 use bubble::BubbleClient;
 mod config;
@@ -7,15 +8,17 @@ use config::{Config, parse_config};
 mod notifier;
 use notifier::DiscordClient;
 mod release_date;
+mod releases;
 mod reminder;
 mod request_pacing;
 #[cfg(test)]
 mod scenario_tests;
 mod state;
 use anyhow::{Context, Result};
-use std::{fs, time::Duration};
+use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 mod schedule;
 mod status;
+mod subscriptions;
 mod tracker;
 
 #[tokio::main]
@@ -49,8 +52,12 @@ async fn main() -> Result<()> {
         std::env::var("DISCORD_WEBHOOK_URL").unwrap_or_else(|_| "FAKE_KEY".to_owned());
     let notifier = DiscordClient::new(http, webhook_url);
 
+    let state_path = PathBuf::from("state.json");
+    let subscriptions = Arc::new(config.subscriptions);
     let status = status::SharedStatus::default();
     let task_status = status.clone();
+    let task_subscriptions = subscriptions.clone();
+    let task_state_path = state_path.clone();
 
     let shutdown = tokio_util::sync::CancellationToken::new();
 
@@ -69,11 +76,11 @@ async fn main() -> Result<()> {
             task_status.write().unwrap().run_started(today);
 
             let result = tracker::run(
-                &config.subscriptions,
+                &task_subscriptions,
                 &bubble_client,
                 &anilist_client,
                 &notifier,
-                std::path::Path::new("state.json"),
+                &task_state_path,
                 today.date_naive(),
             )
             .await;
@@ -98,10 +105,11 @@ async fn main() -> Result<()> {
         }
     });
 
-    let app = axum::Router::new()
-        .route("/health", axum::routing::get(health))
-        .route("/status", axum::routing::get(status::get_status))
-        .with_state(status);
+    let app = app::router(app::AppState {
+        status,
+        subscriptions,
+        state_path,
+    });
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     tracing::info!("listening on http://{}", listener.local_addr()?);
     axum::serve(listener, app)
@@ -112,10 +120,6 @@ async fn main() -> Result<()> {
     tracing::info!("bye");
 
     Ok(())
-}
-
-async fn health() -> &'static str {
-    "ok"
 }
 
 async fn shutdown_signal() {

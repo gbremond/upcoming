@@ -18,6 +18,15 @@ mod tracker;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Logs go to stderr; RUST_LOG overrides the default level (e.g. RUST_LOG=upcoming=info).
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "upcoming=debug".into()),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     let contents =
         fs::read_to_string("subscriptions.yaml").context("Failed to read subscriptions.yaml")?;
     let config: Config = parse_config(&contents).context("Failed to parse subscriptions.yaml")?;

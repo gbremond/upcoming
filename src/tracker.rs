@@ -45,16 +45,18 @@ pub(crate) enum FetchedSeries {
     AniList(Vec<Anime>),
 }
 
+#[tracing::instrument(
+    name = "fetch",
+    skip_all,
+    fields(provider = %subscription.provider, sub = %subscription.name)
+)]
 pub(crate) async fn fetch_subscription(
     subscription: &config::Subscription,
     bubble_client: &BubbleClient,
     anilist_client: &AniListClient,
 ) -> Result<FetchedSeries> {
     let started = std::time::Instant::now();
-    eprintln!(
-        "→ Fetching {}: {} ({})",
-        subscription.provider, subscription.name, subscription.id
-    );
+    tracing::info!(id = %subscription.id, "fetching");
 
     let fetched = match subscription.provider.as_str() {
         "bubble" => {
@@ -102,12 +104,7 @@ pub(crate) async fn fetch_subscription(
     };
 
     if fetched.is_ok() {
-        eprintln!(
-            "✓ Fetched {}: {} in {:.1?}",
-            subscription.provider,
-            subscription.name,
-            started.elapsed()
-        );
+        tracing::info!(elapsed = ?started.elapsed(), "fetched");
     }
 
     fetched
@@ -191,7 +188,10 @@ fn collect_changes(
                 });
             }
         }
-        None => println!("  First run for this subscription: saving baseline."),
+        None => tracing::info!(
+            sub = %subscription.name,
+            "first run for this subscription: saving baseline"
+        ),
     }
 }
 
@@ -203,7 +203,7 @@ pub(crate) async fn notify_and_save(
 ) -> Result<()> {
     if let Err(failures) = send_all(notifier, notifications).await {
         for (index, error) in &failures {
-            eprintln!("Notification {} failed: {error:#}", index + 1);
+            tracing::error!(notification = index + 1, "delivery failed: {error:#}");
         }
 
         let count = failures.len();

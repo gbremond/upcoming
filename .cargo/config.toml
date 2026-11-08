@@ -1,3 +1,5 @@
 [alias]
 # `cargo test` is built in and cannot be aliased; use `cargo t` for nextest.
+t = "nextest run"
+nt = "nextest run"
 ntest = "nextest run"

@@ -5,9 +5,10 @@ use crate::notifier::{self, NotificationReason, ReleaseNotification, send_all};
 use crate::reminder::{album_reminders, episode_reminders};
 use crate::state;
 use anyhow::{Context, Result};
+use futures::{StreamExt, stream::FuturesUnordered};
 
-/// One full tracker pass: fetch every subscription concurrently, apply the
-/// results in config order, then notify and save.
+/// One full tracker pass: fetch subscriptions concurrently and process results
+/// in completion order, notifying and saving each successful scan.
 pub(crate) async fn run(
     subscriptions: &[config::Subscription],
     bubble_client: &BubbleClient,
@@ -18,33 +19,88 @@ pub(crate) async fn run(
 ) -> Result<()> {
     let started = std::time::Instant::now();
     let mut state = state::TrackerState::load(state_path)?;
-    let mut notifications = Vec::new();
 
-    let results = futures::future::join_all(
-        subscriptions
-            .iter()
-            .map(|subscription| fetch_subscription(subscription, bubble_client, anilist_client)),
-    )
-    .await;
+    let mut fetches: FuturesUnordered<_> = subscriptions
+        .iter()
+        .map(|subscription| async move {
+            let result = fetch_subscription(subscription, bubble_client, anilist_client).await;
 
-    for (subscription, fetched) in subscriptions.iter().zip(results) {
-        apply_subscription(
-            subscription,
-            fetched?,
-            &mut state,
-            today,
-            &mut notifications,
-        )?;
-    }
+            (subscription, result)
+        })
+        .collect();
 
-    notify_and_save(notifier, &notifications, &state, state_path).await?;
-    tracing::info!(
-        subscriptions = subscriptions.len(),
-        notifications = notifications.len(),
-        elapsed = ?started.elapsed(),
-        "tracker run completed"
-    );
-    Ok(())
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+
+    let fetching = async move {
+        while let Some(result) = fetches.next().await {
+            if sender.send(result).await.is_err() {
+                break; // Processor exited; stop fetching.
+            }
+        }
+    };
+
+    let processing = async move {
+        let mut failed_subscriptions = 0;
+        let mut failed_notifications = 0;
+        let mut notification_count = 0;
+
+        while let Some((subscription, fetched)) = receiver.recv().await {
+            let mut notifications = Vec::new();
+
+            let result = fetched.and_then(|fetched| {
+                apply_subscription(subscription, fetched, &mut state, today, &mut notifications)
+            });
+
+            if let Err(error) = result {
+                failed_subscriptions += 1;
+                tracing::error!(
+                    sub = %subscription.name,
+                    "subscription scan failed: {error:#}"
+                );
+                continue;
+            }
+
+            notification_count += notifications.len();
+
+            if let Err(failures) = send_all(notifier, &notifications).await {
+                failed_notifications += failures.len();
+
+                for (index, error) in failures {
+                    tracing::error!(
+                        sub = %subscription.name,
+                        notification = index + 1,
+                        "delivery failed: {error:#}"
+                    );
+                }
+            }
+
+            state
+                .save(state_path)
+                .with_context(|| format!("Failed to save state after '{}'", subscription.name))?;
+        }
+
+        tracing::info!(
+            subscriptions = subscriptions.len(),
+            notifications = notification_count,
+            failed_subscriptions,
+            failed_notifications,
+            elapsed = ?started.elapsed(),
+            "tracker scan finished"
+        );
+
+        if failed_subscriptions > 0 || failed_notifications > 0 {
+            anyhow::bail!(
+                "{failed_subscriptions} subscription scan(s) and \
+             {failed_notifications} notification(s) failed; \
+             successful scans were saved"
+            );
+        }
+
+        Ok(())
+    };
+
+    let (_, result) = tokio::join!(fetching, processing);
+    result
 }
 
 pub(crate) enum FetchedSeries {
@@ -185,49 +241,14 @@ fn collect_changes(
     }
 }
 
-pub(crate) async fn notify_and_save(
-    notifier: &impl notifier::Notifier,
-    notifications: &[ReleaseNotification],
-    state: &state::TrackerState,
-    path: &std::path::Path,
-) -> Result<()> {
-    if let Err(failures) = send_all(notifier, notifications).await {
-        for (index, error) in &failures {
-            tracing::error!(notification = index + 1, "delivery failed: {error:#}");
-        }
-
-        let count = failures.len();
-        let (_, first_error) = failures.into_iter().next().expect("failures is nonempty");
-        return Err(first_error.context(format!(
-            "Notification delivery failed for {count} message(s); state was not saved"
-        )));
-    }
-
-    state.save(path)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
-    use std::{collections::BTreeMap, time::Duration};
+    use std::time::Duration;
 
     fn unused_bubble_client() -> BubbleClient {
         BubbleClient::new(reqwest::Client::new(), "http://unused.invalid".to_owned())
-    }
-
-    struct FakeNotifier {
-        fail: bool,
-    }
-
-    impl notifier::Notifier for FakeNotifier {
-        async fn send(&self, _message: &ReleaseNotification) -> Result<()> {
-            if self.fail {
-                anyhow::bail!("delivery failed");
-            }
-            Ok(())
-        }
     }
 
     #[tokio::test]
@@ -266,43 +287,5 @@ mod tests {
             Some(reqwest::StatusCode::TOO_MANY_REQUESTS)
         );
         server.verify().await;
-    }
-
-    #[tokio::test]
-    async fn saves_state_only_after_successful_delivery() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.json");
-
-        let previous = state::TrackerState::default();
-        previous.save(&path).unwrap();
-
-        let mut updated = state::TrackerState::default();
-        updated
-            .providers
-            .insert("bubble".to_owned(), BTreeMap::new());
-        let notifications = vec![ReleaseNotification {
-            subscription_name: "Example".to_owned(),
-            release: state::ReleaseRecord {
-                title: Some("New release".to_owned()),
-                ..Default::default()
-            },
-            reason: NotificationReason::Added,
-        }];
-
-        let failing = FakeNotifier { fail: true };
-        let error = notify_and_save(&failing, &notifications, &updated, &path)
-            .await
-            .unwrap_err();
-        let chain = format!("{error:#}");
-        assert!(chain.contains("state was not saved"));
-        assert!(chain.contains("Failed to send notification 1"));
-        assert!(chain.contains("delivery failed"));
-        assert_eq!(state::TrackerState::load(&path).unwrap(), previous);
-
-        let successful = FakeNotifier { fail: false };
-        notify_and_save(&successful, &notifications, &updated, &path)
-            .await
-            .unwrap();
-        assert_eq!(state::TrackerState::load(&path).unwrap(), updated);
     }
 }

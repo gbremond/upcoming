@@ -91,6 +91,60 @@ async fn new_album_is_notified() {
 }
 
 #[tokio::test]
+async fn notification_failures_still_save_state_without_retrying_changes() {
+    struct FailingNotifier {
+        attempted: Mutex<Vec<String>>,
+    }
+
+    impl Notifier for FailingNotifier {
+        async fn send(&self, notification: &ReleaseNotification) -> Result<()> {
+            self.attempted.lock().unwrap().push(describe(notification));
+            anyhow::bail!("delivery failed");
+        }
+    }
+
+    let mut world = World::new().await;
+    world.follow_bubble("les-5-terres", "Les 5 Terres", vec![album(1, "2026-01-15")]);
+    assert!(world.run().await.is_empty());
+
+    world.add_album("les-5-terres", album(2, "2027-02-10"));
+    world.add_album("les-5-terres", album(3, "2027-05-10"));
+    world.serve_current_api_responses().await;
+
+    let http = reqwest::Client::new();
+    let notifier = FailingNotifier {
+        attempted: Mutex::new(Vec::new()),
+    };
+    let error = tracker::run(
+        &world.subscriptions,
+        &BubbleClient::new(http.clone(), world.bubble_api.uri()),
+        &AniListClient::new(http, world.anilist_api.uri(), Duration::ZERO),
+        &notifier,
+        &world.state_path(),
+        date(TODAY),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(
+        notifier.attempted.into_inner().unwrap(),
+        [
+            "added: Les 5 Terres / T02 — Tome 2",
+            "added: Les 5 Terres / T03 — Tome 3",
+        ]
+    );
+    assert_eq!(
+        error.to_string(),
+        "0 subscription scan(s) and 2 notification(s) failed; successful scans were saved"
+    );
+    assert_eq!(
+        world.saved_release_ids("bubble", "les-5-terres"),
+        ["album-1", "album-2", "album-3"]
+    );
+    assert!(world.run().await.is_empty());
+}
+
+#[tokio::test]
 async fn changed_release_date_is_notified_with_the_previous_date() {
     let mut world = World::new().await;
     world.follow_bubble("les-5-terres", "Les 5 Terres", vec![album(2, "2026-12-08")]);
@@ -120,12 +174,14 @@ async fn reminders_are_sent_on_release_day_and_one_week_before() {
         Season::new(1, "Frieren").episode(5, "2026-11-15"), // in one week
     );
 
-    // Reminders depend only on the date, so they fire even on a first run.
+    let mut notifications = world.run().await;
+    notifications.sort();
+
     assert_eq!(
-        world.run().await,
+        notifications,
         [
-            "today: Les 5 Terres / T02 — Tome 2",
             "in one week: Frieren / Frieren — Episode 5",
+            "today: Les 5 Terres / T02 — Tome 2",
         ]
     );
 }

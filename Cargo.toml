@@ -13,7 +13,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde-saphyr = "2.1.1"
 serde_json = "1.0.154"
 tempfile = "3.27.0"
-tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = "0.7.20"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

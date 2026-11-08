@@ -13,7 +13,8 @@ mod state;
 use anyhow::{Context, Result};
 use std::{fs, time::Duration};
 mod tracker;
-use tracker::{notify_and_save, process_anilist_subscription, process_bubble_subscription};
+use futures::future::join_all;
+use tracker::{apply_subscription, fetch_subscription, notify_and_save};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -42,35 +43,16 @@ async fn main() -> Result<()> {
     let today = chrono::Local::now().date_naive();
     let mut messages = Vec::new();
 
-    for subscription in &config.subscriptions {
-        match subscription.provider.as_str() {
-            "bubble" => {
-                process_bubble_subscription(
-                    subscription,
-                    &bubble_client,
-                    &mut state,
-                    today,
-                    &mut messages,
-                )
-                .await?
-            }
-            "anilist" => {
-                process_anilist_subscription(
-                    subscription,
-                    &anilist_client,
-                    &mut state,
-                    today,
-                    &mut messages,
-                )
-                .await?
-            }
-            provider => {
-                anyhow::bail!(
-                    "Unsupported provider '{provider}' for subscription '{}'",
-                    subscription.name
-                );
-            }
-        }
+    let results = join_all(
+        config
+            .subscriptions
+            .iter()
+            .map(|subscription| fetch_subscription(subscription, &bubble_client, &anilist_client)),
+    )
+    .await;
+
+    for (subscription, fetched) in config.subscriptions.iter().zip(results) {
+        apply_subscription(subscription, fetched?, &mut state, today, &mut messages)?;
     }
 
     notify_and_save(&notifier, &messages, &state, state_path).await?;

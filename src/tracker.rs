@@ -1,5 +1,5 @@
-use crate::anilist::AniListClient;
-use crate::bubble::BubbleClient;
+use crate::anilist::{AniListClient, Anime};
+use crate::bubble::{BubbleClient, BubbleSeries};
 use crate::config;
 use crate::notifier::{self, NotificationReason, ReleaseNotification, send_all};
 use crate::presentation::{anime_updates, episode_reminders, show_upcoming};
@@ -41,9 +41,82 @@ fn update_subscription(
     }
 }
 
-pub(crate) async fn process_bubble_subscription(
+pub(crate) enum Fetched {
+    Bubble(BubbleSeries),
+    AniList(Vec<Anime>),
+}
+
+pub(crate) async fn fetch_subscription(
     subscription: &config::Subscription,
     bubble_client: &BubbleClient,
+    anilist_client: &AniListClient,
+) -> Result<Fetched> {
+    let started = std::time::Instant::now();
+    eprintln!(
+        "→ Fetching {}: {} ({})",
+        subscription.provider, subscription.name, subscription.id
+    );
+
+    let fetched = match subscription.provider.as_str() {
+        "bubble" => {
+            let series = bubble_client
+                .fetch_bubble_series(&subscription.id)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to fetch Bubble subscription '{}' ({})",
+                        subscription.name, subscription.id
+                    )
+                })?;
+            Ok(Fetched::Bubble(series))
+        }
+        "anilist" => {
+            let id = subscription.id.parse::<i32>().with_context(|| {
+                format!(
+                    "Invalid AniList ID '{}' for subscription '{}'",
+                    subscription.id, subscription.name
+                )
+            })?;
+
+            if id <= 0 {
+                anyhow::bail!(
+                    "AniList ID must be positive for subscription '{}' ({id})",
+                    subscription.name
+                );
+            }
+
+            let seasons = anilist_client
+                .fetch_sequel_chain(id)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to fetch AniList subscription '{}' ({id})",
+                        subscription.name
+                    )
+                })?;
+            Ok(Fetched::AniList(seasons))
+        }
+        provider => anyhow::bail!(
+            "Unsupported provider '{provider}' for subscription '{}'",
+            subscription.name
+        ),
+    };
+
+    if fetched.is_ok() {
+        eprintln!(
+            "✓ Fetched {}: {} in {:.1?}",
+            subscription.provider,
+            subscription.name,
+            started.elapsed()
+        );
+    }
+
+    fetched
+}
+
+pub(crate) fn apply_subscription(
+    subscription: &config::Subscription,
+    fetched: Fetched,
     state: &mut state::TrackerState,
     today: chrono::NaiveDate,
     messages: &mut Vec<ReleaseNotification>,
@@ -53,75 +126,36 @@ pub(crate) async fn process_bubble_subscription(
         subscription.provider, subscription.name, subscription.id
     );
 
-    let series = bubble_client
-        .fetch_bubble_series(&subscription.id)
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to fetch Bubble subscription '{}' ({})",
-                subscription.name, subscription.id
-            )
-        })?;
+    match fetched {
+        Fetched::Bubble(series) => {
+            update_subscription(subscription, series.snapshot(), state, today, messages);
+            show_upcoming(&series, &subscription.name, today, messages);
+        }
+        Fetched::AniList(seasons) => {
+            let snapshot = crate::anilist::anime_snapshot(&seasons).with_context(|| {
+                format!(
+                    "Failed to build release snapshot for AniList subscription '{}' ({})",
+                    subscription.name, subscription.id
+                )
+            })?;
 
-    update_subscription(subscription, series.snapshot(), state, today, messages);
+            let reminders = episode_reminders(&snapshot, &subscription.name, today);
 
-    show_upcoming(&series, &subscription.name, today, messages);
+            update_subscription(subscription, snapshot, state, today, messages);
 
-    Ok(())
-}
+            for notification in reminders {
+                println!("    Reminder: {:?}", notification);
+                messages.push(notification);
+            }
 
-pub(crate) async fn process_anilist_subscription(
-    subscription: &config::Subscription,
-    client: &AniListClient,
-    state: &mut state::TrackerState,
-    today: chrono::NaiveDate,
-    messages: &mut Vec<ReleaseNotification>,
-) -> Result<()> {
-    let id = subscription.id.parse::<i32>().with_context(|| {
-        format!(
-            "Invalid AniList ID '{}' for subscription '{}'",
-            subscription.id, subscription.name
-        )
-    })?;
-
-    if id <= 0 {
-        anyhow::bail!(
-            "AniList ID must be positive for subscription '{}' ({id})",
-            subscription.name
-        );
-    }
-
-    let seasons = client.fetch_sequel_chain(id).await.with_context(|| {
-        format!(
-            "Failed to fetch AniList subscription '{}' ({id})",
-            subscription.name
-        )
-    })?;
-
-    println!("=== anilist: {} ({id}) ===", subscription.name);
-
-    let snapshot = crate::anilist::anime_snapshot(&seasons).with_context(|| {
-        format!(
-            "Failed to build release snapshot for AniList subscription '{}' ({id})",
-            subscription.name
-        )
-    })?;
-
-    let reminders = episode_reminders(&snapshot, &subscription.name, today);
-
-    update_subscription(subscription, snapshot, state, today, messages);
-
-    for notification in reminders {
-        println!("    Reminder: {:?}", notification);
-        messages.push(notification);
-    }
-
-    let updates = anime_updates(&seasons);
-    if updates.is_empty() {
-        println!("  No scheduled episodes or announced sequels.");
-    } else {
-        for update in updates {
-            println!("  {update}");
+            let updates = anime_updates(&seasons);
+            if updates.is_empty() {
+                println!("  No scheduled episodes or announced sequels.");
+            } else {
+                for update in updates {
+                    println!("  {update}");
+                }
+            }
         }
     }
 
@@ -154,6 +188,10 @@ pub(crate) async fn notify_and_save(
 mod tests {
     use super::*;
     use std::{collections::BTreeMap, time::Duration};
+
+    fn unused_bubble_client() -> BubbleClient {
+        BubbleClient::new(reqwest::Client::new(), "http://unused.invalid".to_owned())
+    }
 
     struct FakeNotifier {
         fail: bool,
@@ -227,6 +265,64 @@ mod tests {
         }
     }
 
+    #[test]
+    fn newly_announced_season_notifies_once() {
+        use crate::release_date::ReleaseDate;
+
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+        let subscription = config::Subscription {
+            provider: "anilist".to_owned(),
+            id: "1".to_owned(),
+            name: "Jujutsu Kaisen".to_owned(),
+        };
+        let aired_season = state::ReleaseRecord {
+            title: Some("Jujutsu Kaisen Season 3".to_owned()),
+            date: Some(ReleaseDate::Date(today - chrono::Duration::days(300))),
+            ..Default::default()
+        };
+        let announced_season = state::ReleaseRecord {
+            title: Some("Jujutsu Kaisen Season 4".to_owned()),
+            date: Some(ReleaseDate::Partial {
+                year: Some(2027),
+                month: None,
+                day: None,
+            }),
+            image_url: Some("https://example.com/s4.jpg".to_owned()),
+            url: Some("https://anilist.co/anime/2".to_owned()),
+        };
+        let before = BTreeMap::from([("season:1".to_owned(), aired_season.clone())]);
+        let mut after = before.clone();
+        after.insert("season:2".to_owned(), announced_season.clone());
+
+        let mut state = state::TrackerState::default();
+        let mut run = |releases: &BTreeMap<String, state::ReleaseRecord>| {
+            let mut notifications = Vec::new();
+            update_subscription(
+                &subscription,
+                state::SeriesSnapshot {
+                    releases: releases.clone(),
+                },
+                &mut state,
+                today,
+                &mut notifications,
+            );
+            notifications
+        };
+
+        assert!(run(&before).is_empty(), "baseline must not notify");
+
+        let announced = run(&after);
+        assert_eq!(announced.len(), 1);
+        assert_eq!(announced[0].subscription_name, "Jujutsu Kaisen");
+        assert_eq!(announced[0].release, announced_season);
+        assert!(matches!(announced[0].reason, NotificationReason::Added));
+
+        assert!(
+            run(&after).is_empty(),
+            "unchanged rerun must not notify again"
+        );
+    }
+
     #[tokio::test]
     async fn anilist_http_error_retains_subscription_request_and_status() {
         use wiremock::matchers::method;
@@ -247,21 +343,10 @@ mod tests {
                 id: "123".to_owned(),
                 name: "Test anime".to_owned(),
             };
-            let mut state = state::TrackerState::default();
-            let mut messages = Vec::new();
-            let error = process_anilist_subscription(
-                &subscription,
-                &client,
-                &mut state,
-                chrono::NaiveDate::from_ymd_opt(2026, 11, 8).unwrap(),
-                &mut messages,
-            )
-            .await
-            .unwrap_err();
-
-            assert!(state.providers.is_empty());
-            assert!(messages.is_empty());
-            error
+            fetch_subscription(&subscription, &unused_bubble_client(), &client)
+                .await
+                .err()
+                .expect("fetch should fail on repeated 429")
         };
 
         let chain = format!("{error:#}");
@@ -411,20 +496,17 @@ mod tests {
                 id: "123".to_owned(),
                 name: "Example".to_owned(),
             };
+            let bubble_client = unused_bubble_client();
             let mut state = state::TrackerState::default();
 
             for _ in 0..2 {
                 let mut messages = Vec::new();
 
-                process_anilist_subscription(
-                    &subscription,
-                    &client,
-                    &mut state,
-                    today,
-                    &mut messages,
-                )
-                .await
-                .unwrap();
+                let fetched = fetch_subscription(&subscription, &bubble_client, &client)
+                    .await
+                    .unwrap();
+                apply_subscription(&subscription, fetched, &mut state, today, &mut messages)
+                    .unwrap();
 
                 assert_eq!(messages.len(), 1);
                 let notification = &messages[0];

@@ -67,6 +67,7 @@ impl AniListClient {
             "query": ANIME_QUERY,
             "variables": { "id": id }
         });
+        eprintln!("  · AniList anime {id}, page 1");
 
         let mut anime: Anime = self
             .request_media(body)
@@ -106,9 +107,13 @@ impl AniListClient {
                     .and_then(|value| value.parse::<u64>().ok());
 
                 if attempt == 1 {
+                    let wait = Duration::from_secs(retry_after.unwrap_or(60));
+                    eprintln!(
+                        "  ⏳ AniList rate limited (429); pausing all AniList requests for {}s, then retrying once",
+                        wait.as_secs()
+                    );
                     // Pausing the shared gate also holds back concurrent requests.
-                    self.gate
-                        .pause(Duration::from_secs(retry_after.unwrap_or(60)));
+                    self.gate.pause(wait);
                     attempt += 1;
                     continue;
                 }
@@ -143,6 +148,7 @@ impl AniListClient {
     ) -> Result<Vec<ScheduledEpisode>> {
         let mut episodes = std::collections::BTreeMap::new();
         let mut page = 1;
+        eprintln!("  · AniList anime {id}, page {page}");
 
         loop {
             for episode in schedule.nodes {
